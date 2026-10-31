@@ -1,0 +1,68 @@
+name: schengen-planner
+services:
+  tailscale:
+    image: tailscale/tailscale:stable
+    hostname: schengen-planner
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_EXTRA_ARGS: --advertise-tags=tag:schengen-planner
+      TS_AUTH_ONCE: "true"
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./tailscale/serve.json:/config/serve.json:ro
+    networks: [egress, backend]
+    restart: unless-stopped
+
+  web:
+    image: ghcr.io/wrightwells/schengen-travel-planner-web:v1.0.0
+    network_mode: service:tailscale
+    depends_on: [tailscale, api]
+    restart: unless-stopped
+
+  migrate:
+    image: ghcr.io/wrightwells/schengen-travel-planner-api:v1.0.0
+    command: ["/app/.venv/bin/alembic", "upgrade", "head"]
+    environment: &api-environment
+      DATABASE_URL: postgresql+psycopg://planner:${DB_PASSWORD:?Set DB_PASSWORD in .env}@db:5432/planner
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      COOKIE_SECURE: "true"
+    networks: [backend]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    image: ghcr.io/wrightwells/schengen-travel-planner-api:v1.0.0
+    environment: *api-environment
+    networks: [backend]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: planner
+      POSTGRES_USER: planner
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U planner -d planner"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+networks:
+  backend:
+    internal: true
+  egress: {}
+volumes:
+  pgdata:
+  tailscale-state:

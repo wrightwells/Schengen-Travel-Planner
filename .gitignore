@@ -13,3 +13,18 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Build and development artifacts
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.db
+node_modules/
+dist/
+coverage/
+test-results/
+playwright-report/
+backups/
+!.env.example

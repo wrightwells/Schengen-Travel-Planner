@@ -1,0 +1,1 @@
+"""Schengen Travel Planner API."""

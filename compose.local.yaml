@@ -1,0 +1,53 @@
+name: schengen-planner-local
+services:
+  web:
+    build: ./web
+    ports:
+      - "127.0.0.1:9067:8080"
+    networks: [frontend, backend]
+    depends_on: [api]
+    restart: unless-stopped
+
+  migrate:
+    build: ./api
+    command: ["/app/.venv/bin/alembic", "upgrade", "head"]
+    environment: &local-api-environment
+      DATABASE_URL: postgresql+psycopg://planner:${DB_PASSWORD:?Use --env-file .env.local}@db:5432/planner
+      ALLOWED_HOSTS: localhost,127.0.0.1,${PLANNER_TAILSCALE_HOST:-localhost}
+      COOKIE_SECURE: ${PLANNER_COOKIE_SECURE:-false}
+    networks: [backend]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: ./api
+    environment: *local-api-environment
+    networks: [backend]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: planner
+      POSTGRES_USER: planner
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Use --env-file .env.local}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U planner -d planner"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+networks:
+  frontend: {}
+  backend:
+    internal: true
+volumes:
+  pgdata:

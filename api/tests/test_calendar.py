@@ -199,3 +199,78 @@ def test_calendar_2027_counts_only_drop_when_recorded_days_leave_window(environm
     assert july.status_code == 200
     for day in july.json()["travellers"][0]["days"]:
         assert day == days[day["date"]]
+
+
+def test_extra_capacity_preserves_later_plans_and_rich_november_rolloff(environment):
+    client, _ = environment
+    headers = sign_in(client)
+    a, b = client.get("/api/v1/travellers").json()
+    plans = []
+    for start, end, shared in (
+        ("2026-11-08", "2026-11-16", False),
+        ("2027-02-26", "2027-04-11", True),
+        ("2027-06-11", "2027-07-25", True),
+    ):
+        payload = draft(a["id"], start, end, status="PLANNED")
+        if shared:
+            payload["participants"] += draft(b["id"], start, end)["participants"]
+        saved = client.post("/api/v1/trips", headers=headers, json=payload)
+        assert saved.status_code == 201
+        plans.append(saved.json()["id"])
+    for profile in client.get("/api/v1/travellers").json():
+        review(client, headers, profile)
+    year = calendar(client, "2027-01-01", "2027-12-31", plans).json()["travellers"]
+    for person, remaining in zip(year, (36, 45), strict=True):
+        days = {d["date"]: d for d in person["days"]}
+        assert days["2027-04-12"]["remaining_days"] == remaining
+        assert days["2027-05-15"]["remaining_days"] == 45
+        assert days["2027-07-25"]["used_days"] == 90
+        for key in ("2027-04-12", "2027-05-15", "2027-06-10"):
+            assert days[key]["maximum_additional_stay_days"] == 0
+            assert days[key]["status"] == "UNAVAILABLE"
+        assert days["2027-04-12"]["maximum_contiguous_stay_days"] == 45
+    april = calendar(client, "2027-04-01", "2027-04-30", plans).json()["travellers"]
+    for monthly, yearly in zip(april, year, strict=True):
+        assert monthly["days"] == [d for d in yearly["days"] if d["date"].startswith("2027-04")]
+    # Removing summer releases capacity; it must stop at the next booking otherwise.
+    no_summer = calendar(client, "2027-05-15", "2027-05-15", plans[:2]).json()["travellers"]
+    assert all(p["days"][0]["maximum_additional_stay_days"] == 45 for p in no_summer)
+    evaluated = client.post(
+        "/api/v1/eligibility/evaluate",
+        headers=headers,
+        json={
+            "candidate": draft(a["id"], "2027-05-15", "2027-05-15", status="PLANNED"),
+            "included_plan_ids": plans,
+            "search_days": 1,
+        },
+    )
+    assert evaluated.status_code == 200
+    assessment = evaluated.json()["travellers"][0]
+    assert assessment["status"] == "OVER_LIMIT"
+    assert assessment["first_breach_date"] == "2027-07-25"
+
+
+def test_extra_capacity_checks_far_future_days_and_stops_at_neutral_booking(environment):
+    client, _ = environment
+    headers = sign_in(client)
+    a = client.get("/api/v1/travellers").json()[0]
+    saved = client.post(
+        "/api/v1/trips",
+        headers=headers,
+        json=draft(a["id"], "2027-04-01", "2027-06-29", status="PLANNED"),
+    ).json()
+    review(client, headers, a)
+    # The breach would be in June, well beyond the old visible-end + 90-day horizon.
+    day = calendar(client, "2027-01-01", "2027-01-01", [saved["id"]]).json()["travellers"][0][
+        "days"
+    ][0]
+    assert day["maximum_additional_stay_days"] == 0
+    assert day["remaining_days"] == 90
+    assert day["status"] == "UNAVAILABLE"
+    neutral = client.post(
+        "/api/v1/trips",
+        headers=headers,
+        json=draft(a["id"], "2027-01-04", "2027-01-06", code="GB", status="PLANNED"),
+    ).json()
+    day = calendar(client, plans=[neutral["id"]]).json()["travellers"][0]["days"][0]
+    assert day["maximum_additional_stay_days"] == 3

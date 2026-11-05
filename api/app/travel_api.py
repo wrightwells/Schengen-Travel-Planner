@@ -313,7 +313,8 @@ def travel_router(database, authenticated):
                                 end=max(
                                     candidate.exit_date,
                                     candidate.entry_date + timedelta(days=payload.search_days - 1),
-                                ),
+                                )
+                                + timedelta(days=179),
                             )
                         )
             assessment = evaluate(

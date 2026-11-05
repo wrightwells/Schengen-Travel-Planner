@@ -1,6 +1,7 @@
 """Bounded, date-only calendar projections for an explicit saved-plan baseline."""
 
-from datetime import timedelta
+from bisect import bisect_left, bisect_right
+from datetime import date, timedelta
 
 from sqlalchemy import select
 
@@ -8,6 +9,30 @@ from app.catalogue import CATALOGUE_VERSION, RULE_START
 from app.models import Traveller
 from app.services.eligibility import PresenceIndex, dates_between
 from app.services.travel import conflicting_segments, fail, load_trips
+
+
+def additional_stay_capacity(index, day, bookings, baseline_usage):
+    """Extra consecutive days before a booking, preserving later travel's allowance.
+
+    Each new day can affect booked Schengen days up to 179 days later, even
+    outside the visible calendar. Check those days as well as the added stay.
+    """
+    added = []
+    for offset in range(91):
+        probe = day + timedelta(days=offset)
+        if any(p.entry_date <= probe <= p.exit_date for _, p, _ in bookings):
+            break
+        added.append(probe.toordinal())
+        if index.used(probe) + len(added) > 90:
+            return offset
+        future = index.days[
+            bisect_right(index.days, probe.toordinal()) : bisect_right(
+                index.days, probe.toordinal() + 179
+            )
+        ]
+        if any(baseline_usage[d] + len(added) - bisect_left(added, d - 179) > 90 for d in future):
+            return offset
+    return min(len(added), 90)
 
 
 def calendar_view(db, catalogue, start, end, reference_date, selected_ids):
@@ -37,16 +62,20 @@ def calendar_view(db, catalogue, start, end, reference_date, selected_ids):
                 schengen = catalogue.presence(
                     participant.segments,
                     start=start - timedelta(days=179),
-                    end=end + timedelta(days=90),
+                    end=end + timedelta(days=269),
                 )
                 presence.update(schengen)
                 bookings.append((trip, participant, schengen))
         index = PresenceIndex(presence)
+        baseline_usage = {d: index.used(date.fromordinal(d)) for d in index.days}
         days = []
         for day in sorted(dates_between(start, end)):
             associated = [(t, p, s) for t, p, s in bookings if p.entry_date <= day <= p.exit_date]
             used = index.used(day)
             assessed = profile.rule_applicable is True and profile.history_complete
+            additional = None
+            if assessed and day >= max(reference_date, RULE_START) and not associated:
+                additional = additional_stay_capacity(index, day, bookings, baseline_usage)
             if profile.rule_applicable is False:
                 status = "NOT_ASSESSED"
             elif not assessed or day < RULE_START:
@@ -54,7 +83,7 @@ def calendar_view(db, catalogue, start, end, reference_date, selected_ids):
             elif used > 90 and day in presence:
                 status = "OVER_LIMIT"
             elif not associated and day >= reference_date:
-                status = "AVAILABLE" if used < 90 else "UNAVAILABLE"
+                status = "AVAILABLE" if additional else "UNAVAILABLE"
             else:
                 status = "APPROACHING_LIMIT" if used >= 80 else "ASSESSED"
             maximum = None
@@ -74,6 +103,7 @@ def calendar_view(db, catalogue, start, end, reference_date, selected_ids):
                     "remaining_days": max(0, 90 - used),
                     "status": status,
                     "maximum_contiguous_stay_days": maximum,
+                    "maximum_additional_stay_days": additional,
                     "history_presence": any(
                         t.status == "HISTORY" and day in s for t, _, s in associated
                     ),

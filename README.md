@@ -245,7 +245,8 @@ version to `/confirm`. These operations retain an audit trail.
 
 Evaluation accepts `candidate` (a trip payload), `included_plan_ids` (defaults to
 none), `exclude_trip_id` (only the saved plan currently being edited) and a bounded
-`search_days` (default 365). Saved plans never automatically consume allowance.
+`search_days` (default 365). Saved plans never automatically consume allowance. When selected, their affected
+later travel dates are also checked so an extra trip cannot silently invalidate them.
 Full-itinerary searches preserve country segments, recheck membership on shifted
 dates and reject conflicts with selected baseline travel. The maximum continuous
 stay metric measures rule capacity; other booked destinations must also be checked.
@@ -271,6 +272,16 @@ or saving an edit preserves the scenario selection. The editor excludes its own
 saved copy from assessment without changing that selection.
 
 Use the visible **Month view**, **Year view** and **Gantt view** buttons to switch layouts.
+In Gantt view, drag a trip’s left or right handle to change its entry or exit date.
+The bar previews the dates and saves on release; Escape or a cancelled touch leaves
+it unchanged. Focus a handle and use Left/Right to change one day. Drag near the
+edge of the timeline to scroll. Shared itineraries resize together; travellers
+with separate itineraries keep their own dates. Shortening trims country segments;
+extending continues the first or last destination. Conflicts and stale edits are
+rejected with the original bar restored. Editing history clears its completeness
+review. Finish or cancel an open trip editor before using the handles. For trips
+crossing a year boundary, navigate to the year containing the endpoint to resize it.
+
 Gantt view scrolls horizontally across the selected year, with month headers,
 Monday-based week sections, per-traveller daily usage and recorded trip bars.
 Each traveller has one **Travel** row containing all their trip bars, with trip
@@ -295,15 +306,20 @@ shows just that person's count. Counts may be incomplete until history is review
 
 Colours distinguish history, selected plans, breaches, non-Schengen bookings and
 availability. Tooltips and day details identify the person, booking type and
-assessment status. Red counts show over-limit dates, green indicates one-day entry
-capacity, and unknown/unassessed profiles never receive green availability. Day
+assessment status. Red counts show over-limit dates, green indicates capacity to add a Schengen day while keeping later selected travel
+within the allowance, and unknown/unassessed profiles never receive green availability. Day
 counts deduplicate country transition dates. With no plans included, the calendar
 shows history only and explains how to include a plan.
 
 Tap a start date and an end date, then **Plan selected dates** to populate the
 itinerary editor for the visible travellers. Destinations still need review before
-a plan can be assessed or saved. Uninterrupted-stay figures measure rule capacity;
-other booked locations still need checking.
+a plan can be assessed or saved. Day details show extra consecutive Schengen days that can be added before the next
+booking while keeping later selected travel within the allowance. The rolling
+unused-day count describes only the window ending on the inspected date; it does
+not reserve capacity for future plans. The API also retains the separate
+`maximum_contiguous_stay_days` rule-capacity metric; the calendar uses
+`maximum_additional_stay_days`, which checks affected booked days up to 179 days
+after the extra stay, including travel outside the visible month or year.
 
 The authenticated calendar API accepts repeated `included_plan_ids` parameters,
 rejects stale plan IDs and conflicting selected itineraries, and returns up to 366

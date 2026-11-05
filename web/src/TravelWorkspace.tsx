@@ -92,12 +92,12 @@ function Results({ results, loading, error }: { results: Assessment[] | null; lo
         <h4>{person.display_name}</h4><strong>{statusText[person.status] || person.status}</strong>
         {person.first_breach_date && <p>First breach: <b>{person.first_breach_date}</b>. Peak excess: {person.excess_days} day(s).</p>}
         {!['UNKNOWN', 'NOT_ASSESSED', 'NOT_APPLICABLE'].includes(person.status) && <>
-          <dl className="result-metrics"><div><dt>Peak rolling usage</dt><dd>{person.peak_rolling_days} / 90</dd></div>
+          <dl className="result-metrics"><div><dt>Peak usage including affected later travel</dt><dd>{person.peak_rolling_days} / 90</dd></div>
             <div><dt>Remaining at entry / exit</dt><dd>{person.remaining_at_entry} / {person.remaining_at_exit} days</dd></div>
             <div><dt>Maximum uninterrupted stay under the rule</dt><dd>{person.maximum_contiguous_stay_days} days</dd></div>
             <div><dt>Earliest one-day visit</dt><dd>{person.earliest_one_day_entry || 'None within horizon'}</dd></div>
             <div><dt>Earliest entry for this full itinerary</dt><dd>{person.earliest_full_trip_entry || 'None within horizon'}</dd></div></dl>
-          <small>Search ends {person.search_end_date}. Entry and exit both count. Remaining at entry includes the entry day. Maximum stay shows rule capacity; also check your other saved travel dates.</small>
+          <small>Search ends {person.search_end_date}. Entry and exit both count. Remaining at entry includes the entry day and does not reserve days for future plans. The assessment also checks affected later selected travel. Maximum stay shows rule capacity; also check your other saved travel dates.</small>
         </>}
         {person.warnings.map(warning => <p className="result-warning" key={warning}>{warning}</p>)}
       </section>)}
@@ -310,6 +310,28 @@ export function TravelWorkspace({ travellers, csrf, referenceDate, revision, onC
       setFeedback(saved.status === 'HISTORY' ? 'History saved. Please review completeness for the affected travellers.' : 'Provisional plan saved.');
       onChanged(affected);
     }, onExpired };
+  async function resizeTrip(trip: Trip, travellerId: string, edge: 'start' | 'end', date: string) {
+    const source = trip.participants.find(p => p.traveller_id === travellerId);
+    if (!source) throw new Error('Traveller is no longer on this trip. Reload travel data.');
+    const participants = copyDraft(trip).participants.map(person => {
+      if (itineraryKey(person) !== itineraryKey(source)) return person;
+      const start = edge === 'start' ? date : person.entry_date;
+      const end = edge === 'end' ? date : person.exit_date;
+      const ordered = [...person.segments].sort((a, b) => a.start_date.localeCompare(b.start_date) || a.end_date.localeCompare(b.end_date));
+      const segments = ordered.map(segment => ({ ...segment,
+        start_date: segment.start_date < start ? start : segment.start_date,
+        end_date: segment.end_date > end ? end : segment.end_date,
+      })).filter(segment => segment.start_date <= segment.end_date);
+      if (!segments.length) throw new Error('Use the trip editor to review destinations for these dates.');
+      if (start < person.entry_date) segments[0].start_date = start;
+      if (end > person.exit_date) segments[segments.length - 1].end_date = end;
+      return { ...person, entry_date: start, exit_date: end, segments };
+    });
+    const saved = await api<Trip>(`/trips/${trip.id}`, {
+      method: 'PATCH', body: JSON.stringify({ title: trip.title, status: trip.status, participants, version: trip.version }),
+    }, csrf);
+    editorProps.onSaved(saved);
+  }
   return <div className="travel-workspace"><datalist id="country-options">{countries.map(country => <option key={country.code} value={country.name}>{country.code}</option>)}</datalist>
     {error && <div role="alert" className="notice"><p className="error">{error}</p><button onClick={() => setRefresh(refresh + 1)}>Reload travel data</button></div>}
     {feedback && <p role="status" className="success-message">{feedback}</p>}
@@ -347,7 +369,7 @@ export function TravelWorkspace({ travellers, csrf, referenceDate, revision, onC
           setIncludedPlans(ids => value ? [...ids, trip.id] : ids.filter(id => id !== trip.id));
         }} />)}</ul>
     </section>
-    <TravelCalendar travellers={travellers} includedPlans={includedPlans} revision={`${revision}-${refresh}`}
+    <TravelCalendar trips={trips} resizeDisabled={!!editor} onResize={resizeTrip} travellers={travellers} includedPlans={includedPlans} revision={`${revision}-${refresh}`}
       onExpired={onExpired} onPlan={(start, end, ids) => open({ draft: {
         title: '', status: 'PLANNED', participants: ids.map(id => ({
           traveller_id: id, entry_date: start, exit_date: end,

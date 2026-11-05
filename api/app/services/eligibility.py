@@ -62,7 +62,11 @@ def _legal_overlay(baseline: PresenceIndex, candidate: Iterable[date]) -> bool:
     candidate_ordinals = sorted({day.toordinal() for day in candidate})
     existing = set(baseline.days)
     new = [day for day in candidate_ordinals if day not in existing]
-    for ordinal in candidate_ordinals:
+    affected = set(candidate_ordinals)
+    for ordinal in baseline.days:
+        if bisect_right(new, ordinal) - bisect_left(new, ordinal - 179):
+            affected.add(ordinal)
+    for ordinal in affected:
         used = baseline.used(date.fromordinal(ordinal))
         used += bisect_right(new, ordinal) - bisect_left(new, ordinal - 179)
         if used > 90:
@@ -83,7 +87,7 @@ def evaluate(
     candidate_at: Callable[[date], Iterable[date] | None] | None = None,
     one_day_available: Callable[[date], bool] | None = None,
 ) -> Assessment:
-    """Assess each candidate Schengen date and search complete shifted itineraries.
+    """Assess candidate and affected later travel; search complete shifted itineraries.
 
     ``candidate`` contains Schengen dates only; entry/exit may include neutral
     destinations. Search includes ``search_days`` possible entry dates. A shifted
@@ -102,7 +106,13 @@ def evaluate(
         raise ValueError("Candidate presence must lie within the participant dates")
     baseline_days = frozenset(baseline)
     combined = PresenceIndex(baseline_days | proposed)
-    usage = [(day, combined.used(day)) for day in sorted(proposed)]
+    new = sorted(proposed - baseline_days)
+    affected = proposed | {
+        day
+        for day in baseline_days
+        if bisect_right(new, day) - bisect_left(new, day - timedelta(days=179))
+    }
+    usage = [(day, combined.used(day)) for day in sorted(affected)]
     first_breach = next((day for day, used in usage if used > 90), None)
     peak = max((used for _, used in usage), default=0)
     warnings: list[str] = []
@@ -117,7 +127,9 @@ def evaluate(
         status = Status.NOT_APPLICABLE
     elif first_breach:
         status = Status.OVER_LIMIT
-        warnings.append("Proposed stay exceeds the rolling allowance")
+        warnings.append(
+            "Proposed stay exceeds the rolling allowance on this or later selected travel"
+        )
     elif peak >= warning_threshold or 90 - peak < 10:
         status = Status.APPROACHING_LIMIT
         warnings.append("Approaching limit; the selected stay remains within 90 days")

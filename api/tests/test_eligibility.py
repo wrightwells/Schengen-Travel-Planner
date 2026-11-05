@@ -116,7 +116,22 @@ def test_search_horizon_and_maximum_truncation_are_explicit():
 
 
 def test_future_baseline_presence_is_not_counted_early():
-    assert assess([START], [START + DAY]).peak_rolling_days == 1
+    result = assess([START], [START + DAY])
+    assert result.remaining_at_entry == 89
+    assert result.peak_rolling_days == 2
+
+
+def test_extra_travel_cannot_push_later_selected_travel_over_limit():
+    spring = dates_between(date(2027, 2, 26), date(2027, 4, 11))
+    summer = dates_between(date(2027, 6, 11), date(2027, 7, 25))
+    result = assess([date(2027, 5, 15)], spring | summer)
+    assert result.status == Status.OVER_LIMIT
+    assert result.first_breach_date == date(2027, 7, 25)
+    assert result.peak_rolling_days == 91
+    assert result.maximum_contiguous_stay_days == 0
+    # The pure rule engine deduplicates existing presence; the API separately
+    # checks booking conflicts when searching for a new itinerary.
+    assert result.earliest_one_day_entry == date(2027, 6, 11)
 
 
 def test_index_matches_simple_reference_for_random_presence():

@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, ApiError } from './api';
 import { useLocalDate } from './useLocalDate';
-import type { Traveller } from './api';
+import type { Traveller, Trip } from './api';
+import { GanttTrip } from './GanttTrip';
 
 type CalendarDay = {
   date: string; used_days: number; remaining_days: number; status: string;
-  maximum_contiguous_stay_days: number | null; history_presence: boolean; planned_presence: boolean;
+  maximum_contiguous_stay_days: number | null; maximum_additional_stay_days: number | null; history_presence: boolean; planned_presence: boolean;
   trips: { id: string; title: string; status: string; countries: string[] }[];
 };
 type CalendarData = { travellers: { traveller_id: string; display_name: string; days: CalendarDay[] }[] };
@@ -14,7 +15,7 @@ const dayMonth = (day: string) => `${day.slice(8, 10)} ${day.slice(5, 7)}`;
 const fullDate = (day: string) => `${dayMonth(day)} ${day.slice(0, 4)}`;
 const monthDate = (year: number, month: number, day = 1) => new Date(Date.UTC(year, month, day));
 const labels: Record<string, string> = {
-  AVAILABLE: 'One-day entry available', UNAVAILABLE: 'No one-day allowance', OVER_LIMIT: 'Over limit',
+  AVAILABLE: 'Extra travel available', UNAVAILABLE: 'No extra travel capacity', OVER_LIMIT: 'Over limit',
   UNKNOWN: 'Unknown — review history', NOT_ASSESSED: 'Not assessed — check immigration status',
   APPROACHING_LIMIT: 'Approaching limit', ASSESSED: 'Within rolling allowance',
 };
@@ -28,9 +29,11 @@ function appearance(day: CalendarDay) {
   return 'unknown';
 }
 
-function GanttCalendar({ year, people, today, selected, rangeStart, rangeEnd, onSelect }: {
+function GanttCalendar({ year, people, today, selected, rangeStart, rangeEnd, onSelect, savedTrips, resizeDisabled, onResize }: {
   year: number; people: CalendarData['travellers']; today: string; selected: string;
   rangeStart: string; rangeEnd: string; onSelect: (day: string) => void;
+  savedTrips: Trip[]; resizeDisabled: boolean;
+  onResize: (trip: Trip, travellerId: string, edge: 'start' | 'end', date: string) => Promise<void>;
 }) {
   const first = monthDate(year, 0);
   const count = (monthDate(year + 1, 0).getTime() - first.getTime()) / 86400000;
@@ -43,7 +46,7 @@ function GanttCalendar({ year, people, today, selected, rangeStart, rangeEnd, on
   });
   return <div className="gantt-calendar">
     <h3>{year} · Gantt view</h3>
-    <p className="field-note" id="gantt-help">Scroll right to explore the year. Weeks start on Monday; labels show the first visible date. Trip bars show recorded travel. Select daily counts to inspect allowance or choose a date range.</p>
+    <p className="field-note" id="gantt-help">Scroll right to explore the year. Weeks start on Monday; labels show the first visible date. Drag a trip’s start or end handle to change its dates; release to save, or press Escape to cancel. Focus a handle and use Left or Right to change one day. Shared itineraries resize together. Extending uses the first or last destination; shortening trims destinations. Handles are available at actual trip endpoints in the visible year. Select daily counts to inspect allowance or choose a date range.</p>
     <div className="gantt-scroll" role="region" aria-label="Year travel timeline" aria-describedby="gantt-help" tabIndex={0}>
       <div className="gantt-chart" style={{ width: 144 + count * 16 }}>
         <div className="gantt-row gantt-months" style={{ gridTemplateColumns: `144px repeat(${count}, 16px)` }}>
@@ -68,7 +71,7 @@ function GanttCalendar({ year, people, today, selected, rangeStart, rangeEnd, on
               <strong className="gantt-label">{person.display_name}<small>Days used / 90</small></strong>
               {dates.map(date => {
                 const key = iso(date), day = days.get(key);
-                const text = `${person.display_name}: Inspect ${fullDate(key)}${day ? `; ${day.used_days}/90 used; ${day.remaining_days} remaining; ${labels[day.status]}` : ''}`;
+                const text = `${person.display_name}: Inspect ${fullDate(key)}${day ? `; ${day.used_days}/90 used; ${day.remaining_days} unused in this window; ${day.maximum_additional_stay_days ?? 'unassessed'} extra consecutive days with selected plans kept; ${labels[day.status]}` : ''}`;
                 return <button key={key} type="button" disabled={!day} title={text} aria-label={text}
                   aria-pressed={selected === key} onClick={() => onSelect(key)}
                   className={`gantt-day ${date.getUTCDay() === 1 ? 'week-start' : ''} ${key === today ? 'today' : ''} ${rangeStart && key >= rangeStart && key <= (rangeEnd || rangeStart) ? 'in-range' : ''}`}>
@@ -86,12 +89,12 @@ function GanttCalendar({ year, people, today, selected, rangeStart, rangeEnd, on
                 if (previous && previous.style === style && position(day.date) === position(previous.end.date) + 1) previous.end = day;
                 else runs.push({ start: day, end: day, style });
               });
-              return runs.map(run => <button type="button" key={`${id}-${run.start.date}`}
-                  className={`gantt-bar calendar-marker ${run.style}`}
-                  style={{ gridColumn: `${position(run.start.date) + 2} / span ${position(run.end.date) - position(run.start.date) + 1}` }}
-                  title={`${trip.title}: ${fullDate(run.start.date)} to ${fullDate(run.end.date)}`}
-                  aria-label={`${person.display_name}: ${trip.title}, ${fullDate(run.start.date)} to ${fullDate(run.end.date)}; ${labels[run.start.status]}`}
-                  onClick={() => onSelect(run.start.date)}>{trip.title} · {dayMonth(run.start.date)} → {dayMonth(run.end.date)}</button>);
+              const saved = savedTrips.find(t => t.id === id);
+              const participant = saved?.participants.find(p => p.traveller_id === person.traveller_id);
+              if (!saved || !participant) return [];
+              return <GanttTrip key={id} trip={saved} participant={participant} name={person.display_name} year={year}
+                runs={runs.map(run => ({ start: run.start.date, end: run.end.date, style: run.style, label: labels[run.start.status] }))}
+                disabled={resizeDisabled} onSelect={onSelect} onResize={onResize} />;
               })}
               {!trips.size && <span className="gantt-empty" style={{ gridColumn: '2 / -1' }}>No recorded trips in this year.</span>}
             </div>
@@ -102,8 +105,9 @@ function GanttCalendar({ year, people, today, selected, rangeStart, rangeEnd, on
   </div>;
 }
 
-export function TravelCalendar({ travellers, includedPlans, revision, onExpired, onPlan }: {
-  travellers: Traveller[]; includedPlans: string[];
+export function TravelCalendar({ travellers, includedPlans, revision, onExpired, onPlan, trips, resizeDisabled, onResize }: {
+  travellers: Traveller[]; includedPlans: string[]; trips: Trip[]; resizeDisabled: boolean;
+  onResize: (trip: Trip, travellerId: string, edge: 'start' | 'end', date: string) => Promise<void>;
   revision: string; onExpired: () => void;
   onPlan: (start: string, end: string, ids: string[]) => void;
 }) {
@@ -124,8 +128,24 @@ export function TravelCalendar({ travellers, includedPlans, revision, onExpired,
   const [rangeStart, setRangeStart] = useState('');
   const [rangeEnd, setRangeEnd] = useState('');
   const [data, setData] = useState<CalendarData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const loadedRange = useRef('');
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
+  const [resizing, setResizing] = useState(false);
+  const [resizeError, setResizeError] = useState('');
+  const [resizeNotice, setResizeNotice] = useState('');
+  async function resize(trip: Trip, travellerId: string, edge: 'start' | 'end', date: string) {
+    setResizing(true); setResizeError(''); setResizeNotice('Saving trip dates…');
+    try {
+      await onResize(trip, travellerId, edge, date);
+      setResizeNotice(`Saved ${trip.title}: ${edge} date changed to ${date}.`);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) onExpired();
+      setResizeNotice('');
+      setResizeError(error instanceof Error ? error.message : 'Could not save trip dates.');
+    } finally { setResizing(false); }
+  }
   const year = Number(month.slice(0, 4));
   const firstMonth = mode !== 'month' ? 0 : Number(month.slice(5)) - 1;
   const start = [iso(monthDate(year, firstMonth)), '2013-04-22'].sort()[1];
@@ -138,14 +158,16 @@ export function TravelCalendar({ travellers, includedPlans, revision, onExpired,
   }, [mode]);
   useEffect(() => {
     const controller = new AbortController();
-    setData(null); setError('');
+    if (loadedRange.current !== `${start}/${end}`) setData(null);
+    loadedRange.current = `${start}/${end}`;
+    setLoading(true); setError('');
     const query = new URLSearchParams({ start, end, reference_date: today });
     includedPlans.forEach(id => query.append('included_plan_ids', id));
     api<CalendarData>(`/calendar?${query}`, { signal: controller.signal }).then(value => { if (!controller.signal.aborted) setData(value); }).catch(error => {
       if (controller.signal.aborted) return;
       if (error instanceof ApiError && error.status === 401) onExpired();
       setError(error instanceof Error ? error.message : 'Could not load calendar.');
-    });
+    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [start, end, today, includedPlans, revision, retry]);
   const shown = data?.travellers.filter(t => !filter || t.traveller_id === filter) || [];
@@ -184,10 +206,13 @@ export function TravelCalendar({ travellers, includedPlans, revision, onExpired,
       <button className="secondary" onClick={() => setMonth(today.slice(0, 7))}>{mode !== 'month' ? 'This year' : 'This month'}</button>
       <button className="secondary" onClick={() => navigate(1)} disabled={year === 2100 && (mode !== 'month' || firstMonth === 11)}>Next</button></div>
     <ul className="calendar-legend" aria-label="Calendar legend">
-      {[['history', 'Confirmed Schengen history'], ['plan', 'Included Schengen plan'], ['breach', 'Over limit'], ['available', 'One-day entry available'], ['unavailable', 'No one-day allowance'], ['neutral', 'Non-Schengen travel'], ['unknown', 'Unbooked / unknown']].map(([key, text]) => <li key={key}><span className={`calendar-marker ${key}`}>{text}</span></li>)}
+      {[['history', 'Confirmed Schengen history'], ['plan', 'Included Schengen plan'], ['breach', 'Over limit'], ['available', 'Extra travel available'], ['unavailable', 'No extra travel capacity'], ['neutral', 'Non-Schengen travel'], ['unknown', 'Unbooked / unknown']].map(([key, text]) => <li key={key}><span className={`calendar-marker ${key}`}>{text}</span></li>)}
     </ul>
-    <p className="field-note">Each number is the Schengen days used in the 180-day window ending on that date, including history and selected plans. Counts may be incomplete until history is reviewed. Dark borders mark dates with recorded travel. Green means capacity for one Schengen day only; unknown or unassessed profiles never receive green availability.</p>
+    <p className="field-note">Each number is the Schengen days used in the 180-day window ending on that date, including history and selected plans. Counts may be incomplete until history is reviewed. Dark borders mark dates with recorded travel. Green means an extra Schengen day can be added while keeping later selected travel within the allowance. Future plans do not reduce the rolling count until their dates arrive; they can still limit extra travel now. Unknown or unassessed profiles never receive green availability.</p>
     {shown.length > 0 && <p className="field-note calendar-count-order">Count rows, top to bottom: {shown.map(t => t.display_name).join(' · ')}.</p>}
+    {mode === 'gantt' && resizeDisabled && <p className="notice">Finish or cancel the open trip editor before dragging dates.</p>}
+    {resizeError && <p role="alert" className="error">{resizeError} The drag was not saved. Reload travel data if the trip changed elsewhere.</p>}
+    {resizeNotice && <p role="status" className="success-message">{resizeNotice}</p>}
     {error && <div role="alert"><p className="error">{error}</p><button onClick={() => setRetry(n => n + 1)}>Retry calendar</button></div>}
     {!data && !error && <p role="status">Loading calendar…</p>}
     {data && <>
@@ -195,11 +220,12 @@ export function TravelCalendar({ travellers, includedPlans, revision, onExpired,
         const breaches = t.days.filter(d => d.status === 'OVER_LIMIT');
         const unavailable = t.days.filter(d => d.status === 'UNAVAILABLE');
         return breaches.length ? <p className="notice over-limit-notice" key={t.traveller_id}><strong>{t.display_name}: Over limit</strong> on {breaches.length} date(s) shown, starting {breaches[0].date}. Red day counts identify these dates.</p>
-          : unavailable.length ? <p className="notice" key={t.traveller_id}>{t.display_name}: No one-day allowance on {unavailable.length} date(s) outside selected baseline bookings. Use “Include in scenario” above to display and assess a saved plan.</p> : null;
+          : unavailable.length ? <p className="notice" key={t.traveller_id}>{t.display_name}: No extra travel capacity on {unavailable.length} unbooked date(s) while keeping selected plans within the allowance.</p> : null;
       })}</div>
       {mode === 'year' && <h3 className="calendar-period">{year} · Year view</h3>}
       {mode === 'gantt' ? <GanttCalendar year={year} people={shown} today={today} selected={selected}
-        rangeStart={rangeStart} rangeEnd={rangeEnd} onSelect={select} /> : <div className={`calendar-months ${mode}`}>
+        rangeStart={rangeStart} rangeEnd={rangeEnd} onSelect={select}
+        savedTrips={trips} resizeDisabled={resizeDisabled || resizing || loading} onResize={resize} /> : <div className={`calendar-months ${mode}`}>
         {Array.from({ length: mode === 'year' ? 12 : 1 }, (_, i) => {
           const date = monthDate(year, firstMonth + i);
           const heading = date.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
@@ -232,8 +258,8 @@ export function TravelCalendar({ travellers, includedPlans, revision, onExpired,
       <aside className="card calendar-details" aria-label="Selected calendar day" aria-live="polite"><h3>{mode === 'gantt' ? fullDate(selected) : selected}</h3>
         <p className="field-note">Count rows follow this order: {shown.map(t => t.display_name).join('; ')}.</p>
         {shown.map(t => { const day = maps.get(t.traveller_id)?.get(selected); return <div key={t.traveller_id}>
-          <h4>{t.display_name}</h4>{day ? <><p>Selected baseline: {labels[day.status]} · {day.used_days}/90 used · {day.remaining_days} days remaining</p>
-            {day.maximum_contiguous_stay_days !== null && <p>Maximum uninterrupted stay under the rule: {day.maximum_contiguous_stay_days} days. This measures rule capacity; check other booked destinations before planning.</p>}
+          <h4>{t.display_name}</h4>{day ? <><p>Selected baseline: {labels[day.status]} · {day.used_days}/90 used · {day.remaining_days} days unused in this 180-day window</p>
+            {day.maximum_additional_stay_days !== null && <><p><strong>Extra consecutive Schengen days you can add from this date: {day.maximum_additional_stay_days}.</strong> This keeps later selected travel within the 90/180 allowance and stops at your next booking.</p><p className="field-note">Unused days in the current window are not spare days on top of future plans. Older travel can drop out of the window during a stay.</p></>}
             {day.trips.map(trip => <p key={trip.id}>{trip.title} · {trip.status === 'HISTORY' ? 'Confirmed history' : 'Included plan'} · {trip.countries.join(', ')}</p>)}
             {!day.trips.length && <p>No confirmed history or included plans on this date.</p>}</> : <p>Select a date in the visible calendar.</p>}
         </div>; })}

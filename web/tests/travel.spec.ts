@@ -2,283 +2,286 @@ import { test, expect } from '@playwright/test';
 import type { Page, Locator } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 
+async function navigate(page: Page, screen: string) {
+  await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: screen, exact: true }).click();
+}
+async function planner(page: Page, view = 'Trips') {
+  await navigate(page, 'Planner');
+  await page.getByRole('group', { name: 'Planner view', exact: true }).getByRole('button', { name: view, exact: true }).click();
+}
+async function auth(page: Page) {
+  const session = await (await page.request.get('/api/v1/auth/session')).json();
+  return { 'X-Requested-With': 'SchengenPlanner', 'X-CSRF-Token': session.csrf_token };
+}
+async function people(page: Page) { return (await page.request.get('/api/v1/travellers')).json(); }
+async function review(page: Page) {
+  const headers = await auth(page);
+  for (const p of await people(page)) expect((await page.request.patch(`/api/v1/travellers/${p.id}`, { headers, data: {
+    display_name: p.display_name, notes: p.notes, version: p.version, rule_applicable: true, history_complete: true,
+  } })).ok()).toBeTruthy();
+}
+async function seed(page: Page, title: string, start: string, end: string, status = 'PLANNED', shared = true, code = 'FR') {
+  const profiles = await people(page);
+  const result = await page.request.post('/api/v1/trips', { headers: await auth(page), data: { title, status,
+    participants: (shared ? profiles : profiles.slice(0,1)).map((p: {id:string}) => ({ traveller_id: p.id, entry_date: start, exit_date: end,
+      segments: [{ country_code: code, start_date: start, end_date: end }] })),
+  } });
+  expect(result.ok()).toBeTruthy(); return result.json();
+}
+async function include(page: Page, title: string, checked = true) {
+  const options = page.locator('.scenario-options');
+  await options.evaluate(el => (el as HTMLDetailsElement).open = true);
+  await options.getByRole('checkbox', { name: title, exact: true }).setChecked(checked);
+}
+async function fillParticipant(group: Locator, start: string, end: string, country: string) {
+  await group.getByLabel('Entry date', { exact: true }).fill(start);
+  await group.getByLabel('Exit date', { exact: true }).fill(end);
+  await group.getByLabel('Country', { exact: true }).first().fill(country);
+}
+async function row(page: Page, title: string) { return page.locator('.trip-row').filter({ has: page.getByRole('heading', { name: title, exact: true }) }); }
+
 test.beforeEach(async ({ page }) => {
   page.on('dialog', dialog => dialog.accept());
   await page.goto('/');
   await page.getByLabel('Username').fill('test-household');
   await page.getByLabel('Password', { exact: true }).fill('test-only-household-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Add history', exact: true })).toBeEnabled();
-  // Each test starts with clean travel data in the disposable test database.
-  const session = await (await page.request.get('/api/v1/auth/session')).json();
-  const trips = await (await page.request.get('/api/v1/trips')).json();
-  for (const trip of trips) {
-    const response = await page.request.delete(`/api/v1/trips/${trip.id}?version=${trip.version}`, {
-      headers: { 'X-Requested-With': 'SchengenPlanner', 'X-CSRF-Token': session.csrf_token },
-    });
-    expect(response.ok()).toBeTruthy();
+  await expect(page.getByRole('heading', { name: 'Your next chapter, in reach.' })).toBeVisible();
+  for (const trip of await (await page.request.get('/api/v1/trips')).json()) {
+    expect((await page.request.delete(`/api/v1/trips/${trip.id}?version=${trip.version}`, { headers: await auth(page) })).ok()).toBeTruthy();
   }
   await page.reload();
-  await expect(page.getByRole('button', { name: 'Add history', exact: true })).toBeEnabled();
+  await page.getByRole('group', { name: 'Selected traveller', exact: true }).getByRole('button', { name: 'Both', exact: true }).click();
 });
 
-async function fillParticipant(group: Locator, start: string, end: string, country: string) {
-  await group.getByLabel('Entry date', { exact: true }).fill(start);
-  await group.getByLabel('Exit date', { exact: true }).fill(end);
-  await group.getByLabel('Country', { exact: true }).fill(country);
-}
-
-async function deleteTrip(page: Page, title: string) {
-  await page.getByRole('button', { name: `Delete ${title}`, exact: true }).click();
-  await expect(page.getByRole('button', { name: `Delete ${title}`, exact: true })).toHaveCount(0);
-}
-
-test('Gantt calendar scrolls the year with months, weeks, trips and daily inspection', async ({ page }) => {
-  const session = await (await page.request.get('/api/v1/auth/session')).json();
-  const profiles = await (await page.request.get('/api/v1/travellers')).json();
-  const saved = await page.request.post('/api/v1/trips', {
-    headers: { 'X-Requested-With': 'SchengenPlanner', 'X-CSRF-Token': session.csrf_token },
-    data: { title: 'Gantt leap trip', status: 'PLANNED', participants: [{ traveller_id: profiles[0].id,
-      entry_date: '2028-02-28', exit_date: '2028-03-02',
-      segments: [{ country_code: 'FR', start_date: '2028-02-28', end_date: '2028-03-02' }] }] },
-  });
-  expect(saved.ok()).toBeTruthy();
+test('dark Home uses live independent allowance rings and persists traveller selection across screens', async ({ page }) => {
+  await seed(page, 'Confirmed France', '2026-10-01', '2026-10-10', 'HISTORY', false);
+  await seed(page, 'Next adventure', '2027-02-26', '2027-04-11');
+  await review(page); await page.reload();
+  const profiles = await people(page);
+  const cards = page.locator('.allowance-card:visible');
+  await expect(cards).toHaveCount(2);
+  const today = await page.evaluate(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; });
+  const summary = await (await page.request.get(`/api/v1/eligibility/summary?reference_date=${today}`)).json();
+  for (let i = 0; i < 2; i++) {
+    await expect(cards.nth(i).getByRole('img')).toHaveAccessibleName(new RegExp(`${summary.travellers[i].used_days} Schengen days used out of 90`));
+    await expect(cards.nth(i)).toContainText('Confirmed history only');
+  }
+  const selector = page.getByRole('group', { name: 'Selected traveller', exact: true });
+  await selector.getByRole('button', { name: profiles[1].display_name, exact: true }).click();
+  await expect(cards).toHaveCount(test.info().project.name === 'desktop' ? 2 : 1);
+  await expect(page.locator('.allowance-group.is-selected')).toContainText(profiles[1].display_name);
+  await navigate(page, 'History');
+  await expect(page.getByLabel('Filter by traveller')).toHaveValue(profiles[1].id);
+  await navigate(page, 'Home');
   await page.reload();
-  await page.locator('.trip-row').filter({ has: page.getByRole('heading', { name: 'Gantt leap trip', exact: true }) })
-    .getByRole('checkbox', { name: 'Include in scenario', exact: true }).check();
-  const calendar = page.getByRole('region', { name: 'Travel calendar', exact: true });
-  await calendar.getByRole('button', { name: 'Gantt view', exact: true }).click();
-  await calendar.getByRole('combobox', { name: 'Calendar year', exact: true }).selectOption('2028');
-  const timeline = calendar.getByRole('region', { name: 'Year travel timeline', exact: true });
-  await expect(timeline.locator('.gantt-months > strong')).toHaveCount(13);
-  await expect(timeline.locator('.gantt-weeks')).toContainText('03 01');
-  await expect(timeline.locator('.gantt-person')).toHaveCount(2);
-  await expect(timeline.locator('.gantt-bar')).toHaveCount(1);
-  await expect(timeline.locator('.gantt-bar')).toContainText('Gantt leap trip · 28 02 → 02 03');
-  const leap = timeline.getByRole('button', { name: `${profiles[0].display_name}: Inspect 29 02 2028;`, exact: false });
-  await leap.click();
-  await expect(calendar.getByRole('complementary')).toContainText('2/90 used');
-  await timeline.getByRole('button', { name: `${profiles[0].display_name}: Inspect 02 03 2028;`, exact: false }).click();
-  await expect(calendar.getByRole('status')).toContainText('29 02 2028 → 02 03 2028');
-  await expect(calendar.getByRole('button', { name: 'Plan selected dates', exact: true })).toBeEnabled();
-  await timeline.evaluate(el => { el.scrollLeft = el.scrollWidth; });
-  expect(await timeline.evaluate(el => el.scrollLeft)).toBeGreaterThan(0);
-  await expect(timeline.locator('.gantt-months').getByText('December', { exact: true })).toBeInViewport();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
-  await timeline.evaluate(el => { el.scrollLeft = 1400; });
-  await calendar.getByLabel('Calendar traveller').selectOption(profiles[0].id);
-  await expect(timeline.locator('.gantt-person')).toHaveCount(1);
-  await page.screenshot({ path: test.info().outputPath('gantt-calendar.png'), fullPage: true });
-  await page.reload();
-  await expect(calendar.getByRole('button', { name: 'Gantt view', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await expect(calendar.getByRole('combobox', { name: 'Calendar year', exact: true })).toHaveValue('2028');
-  await expect(timeline.locator('.gantt-bar')).toHaveCount(1);
-  await page.locator('.trip-row').filter({ has: page.getByRole('heading', { name: 'Gantt leap trip', exact: true }) })
-    .getByRole('checkbox', { name: 'Include in scenario', exact: true }).uncheck();
-  await expect(timeline.locator('.gantt-bar')).toHaveCount(0);
-  await calendar.getByRole('button', { name: 'Month view', exact: true }).click();
-  await expect(calendar.getByLabel('Calendar month', { exact: true })).toBeVisible();
+  await expect(selector.getByRole('button', { name: profiles[1].display_name, exact: true })).toHaveAttribute('aria-pressed', 'true');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await expect(page.locator('html')).toHaveCSS('background-color', 'rgb(16, 17, 22)');
+  await page.screenshot({ path: test.info().outputPath('dark-home.png'), fullPage: true });
+  await page.getByRole('button', { name: 'Next adventure', exact: false }).click();
+  await expect(page.getByRole('dialog')).toContainText('45 Schengen days');
+  await page.getByRole('button', { name: 'Close details' }).click();
 });
 
-test('shared history uses one itinerary, preserves entered dates and applies traveller choices', async ({ page }) => {
-  const title = `Shared history ${test.info().project.name}`;
+test('shared history is compact, previews authoritative counts and keeps date edits and filters', async ({ page }) => {
+  await navigate(page, 'History');
   await page.getByRole('button', { name: 'Add history', exact: true }).click();
-  const editor = page.locator('.trip-editor');
-  const itinerary = editor.getByRole('group', { name: 'Trip dates and destinations', exact: true });
-  await editor.getByLabel('Trip name').fill(title);
-  await fillParticipant(itinerary, '2026-06-01', '2026-06-10', 'France');
-  await editor.locator('.traveller-selection input').nth(1).check();
+  const editor = page.getByRole('dialog', { name: 'Trip editor' });
+  await editor.getByLabel('Trip name').fill('Shared history');
+  await fillParticipant(editor, '2026-06-01', '2026-06-10', 'France');
   await expect(editor.getByLabel('Entry date', { exact: true })).toHaveCount(1);
-  await expect(editor.getByLabel('Exit date', { exact: true })).toHaveCount(1);
-  await expect(editor.getByLabel('Entry date', { exact: true })).toHaveValue('2026-06-01');
-  for (let i = 0; i < 2; i++) await editor.locator('.traveller-selection input').nth(i).uncheck();
-  await expect(editor.getByLabel('Entry date', { exact: true })).toHaveValue('2026-06-01');
+  await expect(editor.getByLabel('History day count')).toContainText('10 Schengen days');
+  for (const box of await editor.locator('.traveller-selection input').all()) await box.uncheck();
   await editor.getByRole('button', { name: 'Save history', exact: true }).click();
   await expect(editor.getByRole('alert')).toContainText('Select at least one traveller');
-  for (let i = 0; i < 2; i++) await editor.locator('.traveller-selection input').nth(i).check();
+  for (const box of await editor.locator('.traveller-selection input').all()) await box.check();
   await editor.getByRole('button', { name: 'Save history', exact: true }).click();
-  const row = page.locator('.trip-row').filter({ has: page.getByRole('heading', { name: title, exact: true }) });
-  await expect(row.getByText('10 Schengen days', { exact: true })).toHaveCount(2);
-  await page.reload();
-  await expect(row.getByRole('heading', { name: title, exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Add history', exact: true }).click();
-  await editor.getByLabel('Trip name').fill('Duplicate record');
-  await fillParticipant(itinerary, '2026-06-01', '2026-06-10', 'France');
-  await editor.getByRole('button', { name: 'Save history', exact: true }).click();
-  await expect(editor.getByRole('alert')).toContainText('Dates conflict with recorded trip');
-  await editor.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await row.getByRole('button', { name: `Edit ${title}`, exact: true }).click();
-  await itinerary.getByRole('button', { name: 'Add country', exact: true }).click();
-  await itinerary.getByLabel('Country departure', { exact: true }).first().fill('2026-06-05');
-  await itinerary.getByLabel('Country arrival', { exact: true }).nth(1).fill('2026-06-05');
-  await itinerary.getByLabel('Country', { exact: true }).nth(1).fill('Spain');
+  const trip = await row(page, 'Shared history');
+  await expect(trip.getByText('10 Schengen days', { exact: true })).toHaveCount(1);
+  await expect(trip.locator('.avatar-chips>span')).toHaveCount(2);
+  await trip.getByRole('button', { name: 'Shared history', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('Confirmed history');
+  await page.getByRole('button', { name: 'Edit trip', exact: true }).click();
+  await editor.getByRole('button', { name: 'Add country', exact: true }).click();
+  await editor.getByLabel('Country departure', { exact: true }).first().fill('2026-06-05');
+  await editor.getByLabel('Country arrival', { exact: true }).nth(1).fill('2026-06-05');
+  await editor.getByLabel('Country', { exact: true }).nth(1).fill('Spain');
   await editor.getByRole('button', { name: 'Save changes', exact: true }).click();
-  await expect(row.getByText('10 Schengen days', { exact: true })).toHaveCount(2);
-  await page.getByLabel('Filter by country').selectOption('ES');
-  await expect(row.locator('.trip-person')).toHaveCount(2);
+  await expect(trip.getByText('10 Schengen days', { exact: true })).toHaveCount(1);
+  await page.getByLabel('Filter by country').selectOption('ES'); await expect(trip).toBeVisible();
+  await page.getByLabel('Filter by country').selectOption('GB'); await expect(trip).toHaveCount(0);
   await page.getByLabel('Filter by country').selectOption('');
-  await row.getByRole('button', { name: `Edit ${title}`, exact: true }).click();
-  await editor.locator('.traveller-selection input').nth(1).uncheck();
-  await editor.getByRole('button', { name: 'Save changes', exact: true }).click();
-  await expect(row.locator('.trip-person')).toHaveCount(1);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: test.info().outputPath('travel-history.png'), fullPage: true });
-  await deleteTrip(page, title);
+  let confirmed = false;
+  page.removeAllListeners('dialog'); page.once('dialog', async d => { confirmed = true; await d.dismiss(); });
+  await trip.getByRole('button', { name: 'Delete Shared history', exact: true }).click();
+  expect(confirmed).toBe(true); await expect(trip).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: test.info().outputPath('dark-history.png'), fullPage: true });
 });
 
-test('planner evaluates both travellers, saves, duplicates and confirms reviewed actual travel', async ({ page }) => {
-  const title = `Future journey ${test.info().project.name}`;
-  const profiles = page.locator('.profiles');
-  await expect(profiles.locator('.profile')).toHaveCount(2);
-  await expect(page.getByText('Loading your household…', { exact: true })).toHaveCount(0);
-  for (let i = 0; i < 2; i++) {
-    const button = profiles.locator('.profile').nth(i).getByRole('button', { name: 'Confirm history complete', exact: true });
-    if (await button.count()) {
-      await button.click();
-      await expect(profiles.locator('.profile').nth(i).getByRole('button', { name: 'Mark history incomplete' })).toBeEnabled();
-      await expect(page.getByText('Loading your household…', { exact: true })).toHaveCount(0);
-    }
-  }
-  await page.getByRole('button', { name: 'Plan a trip', exact: true }).click();
-  const editor = page.locator('.trip-editor');
-  await editor.getByLabel('Trip name').fill(title);
-  await fillParticipant(editor.locator('.participant-editor').first(), '2027-04-01', '2027-04-10', 'France');
-  await editor.locator('.traveller-selection input').nth(1).check();
-  await expect(editor.locator('.participant-editor')).toHaveCount(1);
-  await expect(editor.getByLabel('Entry date', { exact: true })).toHaveValue('2027-04-01');
+test('planner evaluates both travellers, saves excluded plans, duplicates and explicitly confirms history', async ({ page }) => {
+  await review(page); await page.reload(); await planner(page);
+  await page.getByRole('button', { name: test.info().project.name === 'mobile-320' ? 'Plan trip' : 'Plan a trip', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Trip editor' });
+  await editor.getByLabel('Trip name').fill('Future journey');
+  await fillParticipant(editor, '2027-04-01', '2027-04-10', 'France');
   await expect(editor.getByText('Permitted in selected scenario', { exact: true })).toHaveCount(2);
-  await page.screenshot({ path: test.info().outputPath('future-planner.png'), fullPage: true });
+  await expect(editor.getByText('10 calendar days · Entry and exit included')).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath('dark-editor.png'), fullPage: true });
   await editor.getByRole('button', { name: 'Save plan', exact: true }).click();
-  const row = page.locator('.trip-row').filter({ has: page.getByRole('heading', { name: title, exact: true }) });
-  await expect(row.getByText('Provisional plan', { exact: true })).toBeVisible();
-  await expect(row.getByRole('checkbox', { name: 'Include in scenario', exact: true })).not.toBeChecked();
-
-  await row.getByRole('button', { name: `Duplicate ${title}`, exact: true }).click();
-  await expect(editor.getByLabel('Trip name')).toHaveValue(`${title} (copy)`);
+  const trip = await row(page, 'Future journey');
+  await expect(trip.getByRole('checkbox')).not.toBeChecked();
+  await trip.getByRole('button', { name: 'Duplicate Future journey', exact: true }).click();
+  await expect(editor.getByLabel('Trip name')).toHaveValue('Future journey (copy)');
   await editor.getByRole('button', { name: 'Save plan', exact: true }).click();
-  await expect(page.getByRole('heading', { name: `${title} (copy)`, exact: true })).toBeVisible();
-  await row.getByRole('checkbox').check();
-  await page.getByRole('button', { name: `Edit ${title} (copy)`, exact: true }).click();
+  await trip.getByRole('checkbox').check();
+  await page.getByRole('button', { name: 'Edit Future journey (copy)', exact: true }).click();
   await expect(editor.getByRole('alert')).toContainText('Itinerary conflicts with baseline trip');
   await editor.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await deleteTrip(page, `${title} (copy)`);
-
-  await row.getByRole('button', { name: `Confirm ${title} as history`, exact: true }).click();
-  await expect(editor.getByRole('heading', { name: 'Review actual travel dates' })).toBeVisible();
-  await expect(editor.locator('.participant-editor')).toHaveCount(1);
-  await fillParticipant(editor.locator('.participant-editor'), '2026-02-01', '2026-02-05', 'France');
+  await page.getByRole('button', { name: 'Delete Future journey (copy)', exact: true }).click();
+  await trip.getByRole('button', { name: 'Confirm Future journey as history', exact: true }).click();
+  await fillParticipant(editor, '2026-02-01', '2026-02-05', 'France');
   await editor.getByRole('button', { name: 'Confirm actual travel', exact: true }).click();
-  await expect(row.getByText('Confirmed history', { exact: true })).toBeVisible();
-  await expect(profiles.getByRole('button', { name: 'Confirm history complete', exact: true })).toHaveCount(2);
-  await page.reload();
-  await expect(row.getByText('Confirmed history', { exact: true })).toBeVisible();
-  await deleteTrip(page, title);
+  await expect(editor).toHaveCount(0);
+  await navigate(page, 'History');
+  await expect((await row(page, 'Future journey')).getByText('Confirmed history', { exact: true })).toBeVisible();
+  await navigate(page, 'More');
+  await expect(page.getByRole('button', { name: 'Confirm history complete', exact: true })).toHaveCount(2);
 });
 
-test('calendar navigates leap year, separates travellers and creates a plan from tapped dates', async ({ page }) => {
+test('calendar day sheets support leap-day range selection, year views and scenario persistence', async ({ page }) => {
+  await review(page); await page.reload(); await planner(page, 'Calendar');
   const calendar = page.getByRole('region', { name: 'Travel calendar', exact: true });
   await calendar.getByLabel('Calendar month', { exact: true }).fill('2028-02');
-  await expect(calendar.getByRole('button', { name: 'Inspect 2028-02-29', exact: true })).toBeVisible();
-  await expect(calendar.locator('.calendar-empty').first()).toHaveCSS('border-top-width', '0px');
   await calendar.getByRole('button', { name: 'Inspect 2028-02-28', exact: true }).click();
+  await page.getByRole('button', { name: 'Choose end date', exact: true }).click();
   await calendar.getByRole('button', { name: 'Inspect 2028-02-29', exact: true }).click();
-  await expect(calendar.getByRole('status')).toContainText('2028-02-28 → 2028-02-29');
-  await expect(calendar.getByRole('complementary', { name: 'Selected calendar day' })).toContainText('0/90 used');
-  await calendar.getByRole('button', { name: 'Plan selected dates', exact: true }).click();
-  const editor = page.locator('.trip-editor');
-  await expect(editor.locator('.participant-editor')).toHaveCount(1);
-  await expect(editor.getByLabel('Entry date', { exact: true }).first()).toHaveValue('2028-02-28');
-  await expect(editor.getByLabel('Exit date', { exact: true }).first()).toHaveValue('2028-02-29');
-  await editor.getByLabel('Trip name').fill('Calendar leap visit');
-  await editor.getByLabel('Country', { exact: true }).first().fill('France');
+  await expect(page.getByRole('dialog')).toContainText('2028-02-28 → 2028-02-29');
+  await page.getByRole('button', { name: 'Plan selected dates', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Trip editor' });
+  await expect(editor.getByLabel('Entry date', { exact: true })).toHaveValue('2028-02-28');
+  await expect(editor.getByLabel('Exit date', { exact: true })).toHaveValue('2028-02-29');
+  await editor.getByLabel('Trip name').fill('Leap visit'); await editor.getByLabel('Country', { exact: true }).fill('France');
   await editor.getByRole('button', { name: 'Save plan', exact: true }).click();
-  const row = page.locator('.trip-row').filter({ has: page.getByRole('heading', { name: 'Calendar leap visit', exact: true }) });
-  await row.getByRole('checkbox').check();
+  await include(page, 'Leap visit');
   const day = calendar.getByRole('button', { name: 'Inspect 2028-02-29', exact: true });
-  await expect(day.locator('.calendar-marker.plan')).toHaveCount(2);
-  await expect(day.locator('.calendar-marker.plan')).toHaveText(['2', '2']);
-  await expect(day).toHaveCSS('border-top-color', 'rgb(119, 141, 130)');
-  await expect(day.locator('.calendar-marker.neutral')).toHaveCount(0);
-  await day.click();
-  await expect(calendar.getByRole('complementary')).toContainText('Calendar leap visit');
-  await expect(calendar.getByRole('complementary')).toContainText('2/90 used');
-  await row.getByRole('checkbox').uncheck();
-  await expect(day.locator('.calendar-marker.plan')).toHaveCount(0);
-  await expect(day).toHaveCSS('border-top-color', 'rgb(216, 221, 211)');
-  await expect(day.locator('.calendar-marker.neutral')).toHaveCount(0);
-  await day.click();
-  await expect(calendar.getByRole('complementary')).not.toContainText('Calendar leap visit');
+  await expect(day.locator('.calendar-marker.plan')).toHaveText(['2','2']);
+  await day.click(); await expect(page.getByRole('dialog')).toContainText('Leap visit');
+  await page.getByRole('button', { name: 'Close details', exact: true }).click();
   await calendar.getByRole('button', { name: 'Year view', exact: true }).click();
-  await expect(calendar.getByRole('heading', { name: 'December 2028', exact: true })).toBeVisible();
-  await expect(calendar.getByRole('button', { name: 'Inspect 2028-12-31', exact: true })).toHaveCount(1);
   await expect(calendar.locator('.calendar-month')).toHaveCount(12);
-  await calendar.getByRole('combobox', { name: 'Calendar year', exact: true }).selectOption('2024');
-  await expect(calendar.getByRole('button', { name: 'Inspect 2024-02-29', exact: true })).toBeVisible();
-  await calendar.getByRole('combobox', { name: 'Calendar year', exact: true }).selectOption('2028');
-  const personId = await calendar.getByLabel('Calendar traveller').locator('option').nth(1).getAttribute('value');
-  await calendar.getByLabel('Calendar traveller').selectOption(personId!);
-  await expect(calendar.getByRole('button', { name: 'Inspect 2028-02-29', exact: true }).locator('.calendar-marker')).toHaveCount(1);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: test.info().outputPath('calendar-year.png'), fullPage: true });
+  await navigate(page, 'Home'); await planner(page, 'Calendar');
+  await expect(calendar.getByRole('combobox', { name: 'Calendar year', exact: true })).toHaveValue('2028');
+  await calendar.getByRole('button', { name: 'Month view', exact: true }).click();
+  await expect(calendar.getByLabel('Calendar month', { exact: true })).toHaveValue('2028-02');
+  await expect(day.locator('.calendar-marker.plan')).toHaveCount(2);
+  await page.reload(); await expect(day.locator('.calendar-marker.plan')).toHaveCount(2);
+  await include(page, 'Leap visit', false); await expect(day.locator('.calendar-marker.plan')).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: test.info().outputPath('dark-calendar.png'), fullPage: true });
 });
 
-test('calendar scenario checkboxes show independent breaches and remember visibility after reload', async ({ page }) => {
-  const session = await (await page.request.get('/api/v1/auth/session')).json();
-  const profiles = await (await page.request.get('/api/v1/travellers')).json();
-  const headers = { 'X-Requested-With': 'SchengenPlanner', 'X-CSRF-Token': session.csrf_token };
-  function participant(id: string, start: string, end: string) {
-    return { traveller_id: id, entry_date: start, exit_date: end,
-      segments: [{ country_code: 'FR', start_date: start, end_date: end }] };
-  }
-  const history = await page.request.post('/api/v1/trips', { headers, data: {
-    title: 'Calendar warning history', status: 'HISTORY', participants: [
-      participant(profiles[0].id, '2026-07-30', '2026-10-28'),
-      participant(profiles[1].id, '2026-09-01', '2026-10-19'),
-    ],
-  } });
-  expect(history.ok()).toBeTruthy();
-  const plan = await page.request.post('/api/v1/trips', { headers, data: {
-    title: 'Calendar warning trip', status: 'PLANNED', participants: profiles.map((p: { id: string }) =>
-      participant(p.id, '2026-11-08', '2027-01-29')),
-  } });
-  expect(plan.ok()).toBeTruthy();
-  const saved = await plan.json();
-  for (const p of await (await page.request.get('/api/v1/travellers')).json()) {
-    const review = await page.request.patch(`/api/v1/travellers/${p.id}`, { headers, data: {
-      display_name: p.display_name, notes: p.notes, version: p.version, rule_applicable: true, history_complete: true,
-    } });
-    expect(review.ok()).toBeTruthy();
-  }
-  await page.reload();
+test('calendar separates unused rolling allowance from capacity protected for later plans', async ({ page }) => {
+  await seed(page, 'Spring capacity', '2027-02-26', '2027-04-11');
+  await seed(page, 'Summer capacity', '2027-06-11', '2027-07-25');
+  await review(page); await page.reload(); await planner(page, 'Calendar');
+  await include(page, 'Spring capacity'); await include(page, 'Summer capacity');
   const calendar = page.getByRole('region', { name: 'Travel calendar', exact: true });
-  await expect(calendar.getByText('Showing confirmed history only.', { exact: false })).toBeVisible();
-  const row = page.locator('.trip-row').filter({ has: page.getByRole('heading', { name: 'Calendar warning trip', exact: true }) });
-  await row.getByRole('checkbox').check();
-  await calendar.getByLabel('Calendar month', { exact: true }).fill('2026-11');
-  const entry = calendar.getByRole('button', { name: 'Inspect 2026-11-08', exact: true });
-  await expect(entry.locator('.calendar-marker.breach')).toHaveCount(1);
-  await expect(entry.locator('.calendar-marker.plan')).toHaveCount(1);
-  await expect(entry.locator('.calendar-marker.breach')).toHaveText('92');
-  await expect(entry.locator('.calendar-marker.plan')).toHaveText('50');
-  await calendar.getByLabel('Calendar month', { exact: true }).fill('2026-12');
-  await expect(calendar.getByRole('button', { name: 'Inspect 2026-12-18', exact: true }).locator('.calendar-marker.breach')).toHaveCount(1);
-  await expect(calendar.getByRole('button', { name: 'Inspect 2026-12-19', exact: true }).locator('.calendar-marker.breach')).toHaveCount(2);
-  await page.reload();
-  await expect(row.getByRole('checkbox')).toBeChecked();
-  await expect(calendar.getByLabel('Calendar month', { exact: true })).toHaveValue('2026-12');
-  await expect(calendar.getByLabel('Visible calendar warnings')).toContainText('2026-12-19');
-  await expect(calendar.getByRole('button', { name: 'Inspect 2026-12-19', exact: true }).locator('.calendar-marker.breach')).toHaveCount(2);
-  await calendar.screenshot({ path: test.info().outputPath('calendar-breaches.png') });
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await row.getByRole('checkbox').uncheck();
-  await expect(calendar.getByRole('button', { name: 'Inspect 2026-12-19', exact: true }).locator('.calendar-marker.breach')).toHaveCount(0);
-  await expect(calendar.getByRole('button', { name: 'Inspect 2026-12-19', exact: true }).locator('.calendar-marker.unavailable')).toHaveCount(1);
-  await calendar.getByRole('button', { name: 'Inspect 2026-12-19', exact: true }).click();
-  await expect(calendar.getByRole('complementary')).not.toContainText('Calendar warning trip');
+  await calendar.getByLabel('Calendar month', { exact: true }).fill('2027-05');
+  await calendar.getByRole('button', { name: 'Inspect 2027-05-15', exact: true }).click();
+  const details = page.getByRole('dialog');
+  await expect(details.getByText(/45 days unused in this 180-day window/)).toHaveCount(2);
+  await expect(details.getByText('Extra consecutive Schengen days you can add from this date: 0.', { exact: true })).toHaveCount(2);
+  await page.screenshot({ path: test.info().outputPath('dark-day-details.png'), fullPage: true });
 });
 
+test('timeline previews shared date changes for review, supports keyboard editing and rejects stale saves', async ({ page }) => {
+  const original = await seed(page, 'Shared timeline', '2028-03-10', '2028-03-20');
+  await review(page); await page.reload(); await planner(page, 'Timeline'); await include(page, 'Shared timeline');
+  const calendar = page.getByRole('region', { name: 'Travel calendar', exact: true });
+  await calendar.getByRole('combobox', { name: 'Calendar year', exact: true }).selectOption('2028');
+  const timeline = calendar.getByRole('region', { name: 'Year travel timeline' });
+  await expect(timeline.locator('.gantt-trip')).toHaveCount(2);
+  const profile = (await people(page))[0];
+  const handle = timeline.getByRole('button', { name: `${profile.display_name}: Change end of Shared timeline`, exact: true });
+  await handle.scrollIntoViewIfNeeded();
+  await handle.evaluate(el => { const scroller = el.closest('.gantt-scroll')!; const b = scroller.getBoundingClientRect(); scroller.scrollLeft += el.getBoundingClientRect().x - (b.left + 112 + (b.width - 112)/2); });
+  const box = (await handle.boundingBox())!;
+  if (test.info().project.name === 'mobile-320') {
+    const cdp = await page.context().newCDPSession(page);
+    const x = box.x + 12, y = box.y + 24;
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{x,y}] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{x:x+24,y}] });
+    await expect(timeline.locator('.gantt-preview')).toBeVisible();
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] }); await cdp.detach();
+  } else {
+    await page.mouse.move(box.x+12,box.y+24); await page.mouse.down(); await page.mouse.move(box.x+36,box.y+24);
+    await expect(timeline.locator('.gantt-preview')).toBeVisible(); await page.keyboard.press('Escape'); await page.mouse.up();
+  }
+  expect((await (await page.request.get(`/api/v1/trips/${original.id}`)).json()).version).toBe(original.version);
+  await handle.focus(); await handle.press('ArrowRight');
+  const editor = page.getByRole('dialog', { name: 'Trip editor' });
+  await expect(editor).toContainText('Timeline change affects');
+  await expect(editor.getByLabel('Exit date', { exact: true })).toHaveValue('2028-03-21');
+  expect((await (await page.request.get(`/api/v1/trips/${original.id}`)).json()).version).toBe(original.version);
+  await editor.getByRole('button', { name: 'Save plan', exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  let saved = await (await page.request.get(`/api/v1/trips/${original.id}`)).json();
+  expect(saved.participants.every((p: {exit_date:string}) => p.exit_date === '2028-03-21')).toBe(true);
+  await handle.focus(); await handle.press('ArrowRight'); await expect(editor).toBeVisible();
+  const concurrent = await page.request.patch(`/api/v1/trips/${saved.id}`, { headers: await auth(page), data: {
+    title: saved.title, status: saved.status, version: saved.version,
+    participants: saved.participants.map((p: { traveller_id:string; entry_date:string; exit_date:string; segments:{country_code:string;start_date:string;end_date:string}[] }) => ({
+      traveller_id: p.traveller_id, entry_date:p.entry_date, exit_date:p.exit_date,
+      segments:p.segments.map(segment => ({ country_code:segment.country_code,start_date:segment.start_date,end_date:segment.end_date })),
+    })),
+  } });
+  expect(concurrent.ok()).toBeTruthy();
+  await editor.getByRole('button', { name: 'Save plan', exact: true }).click();
+  await expect(editor.getByRole('alert')).toContainText('changed');
+  await editor.getByRole('button', { name: 'Cancel', exact: true }).click();
+  saved = await (await page.request.get(`/api/v1/trips/${original.id}`)).json();
+  expect(saved.participants[0].exit_date).toBe('2028-03-21');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: test.info().outputPath('dark-timeline.png'), fullPage: true });
+});
 
+test('history with different itineraries requires an explicit shared-date review', async ({ page }) => {
+  const profiles = await people(page);
+  const response = await page.request.post('/api/v1/trips', { headers: await auth(page), data: { title: 'Different dates', status: 'HISTORY', participants: profiles.map((p: {id:string},i:number) => ({ traveller_id:p.id, entry_date:`2026-05-0${i+1}`, exit_date:'2026-05-10', segments:[{country_code:i ? 'ES':'FR',start_date:`2026-05-0${i+1}`,end_date:'2026-05-10'}] })) } });
+  expect(response.ok()).toBeTruthy(); await page.reload(); await navigate(page, 'History');
+  const trip = await row(page, 'Different dates'); await expect(trip.locator('.trip-person')).toHaveCount(2);
+  await trip.getByRole('button', { name:'Edit Different dates',exact:true }).click();
+  const editor = page.getByRole('dialog', { name:'Trip editor' });
+  await expect(editor.getByRole('button',{name:'Save changes',exact:true})).toBeDisabled();
+  await editor.getByLabel('Copy existing itinerary from').selectOption(profiles[1].id);
+  await editor.getByLabel('Apply the shared dates and destinations to every selected traveller').check();
+  await editor.getByRole('button',{name:'Save changes',exact:true}).click();
+  await expect(trip.locator('.trip-person')).toHaveCount(1);
+  await expect(trip).toContainText('Spain');
+});
+
+test('failed calculations remain unavailable and keyboard users can open and dismiss sheets', async ({ page }) => {
+  await page.route('**/api/v1/eligibility/summary?*', route => route.fulfill({ status:503, contentType:'application/json', body:JSON.stringify({detail:'Calculation offline'}) }));
+  await page.reload();
+  await expect(page.getByRole('alert')).toContainText('Calculation unavailable');
+  await expect(page.locator('.allowance-card')).toHaveCount(0);
+  await page.unroute('**/api/v1/eligibility/summary?*');
+  await page.getByRole('button',{name:'Retry',exact:true}).click();
+  await expect(page.locator('.allowance-card')).toHaveCount(2);
+  await planner(page,'Calendar');
+  const calendar = page.getByRole('region',{name:'Travel calendar',exact:true});
+  await calendar.getByLabel('Calendar month',{exact:true}).fill('2027-03');
+  const day = calendar.getByRole('button',{name:'Inspect 2027-03-28',exact:true});
+  await day.focus(); await day.press('Enter');
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(day).toBeFocused();
+});
 test('exports preview and download separate CSV/history/plans snapshots for each traveller', async ({ page }) => {
+  await navigate(page, 'More');
   const panel = page.getByRole('region', { name: 'Export travel', exact: true });
   await panel.getByRole('button', { name: 'Preview export', exact: true }).click();
   await expect(panel.getByText('No matching trips to export.', { exact: false })).toBeVisible();
@@ -356,6 +359,7 @@ test('exports preview and download separate CSV/history/plans snapshots for each
 });
 
 test('CSV import maps names, commits reviewed history and skips exported duplicates', async ({ page }) => {
+  await navigate(page, 'More');
   const key = '12345678-1234-5678-1234-567812345678';
   const title = `Imported history ${test.info().project.name}`;
   const csv = 'schema_version,trip_external_id,traveller_name,trip_title,country_code,segment_start,segment_end,trip_status\r\n'
@@ -372,7 +376,7 @@ test('CSV import maps names, commits reviewed history and skips exported duplica
   expect((await (await page.request.get('/api/v1/trips?status=HISTORY')).json()).length).toBe(0);
   await panel.getByRole('button', { name: 'Commit 1 selected trip', exact: true }).click();
   await expect(panel.getByRole('status').filter({ hasText: 'Imported 1 trip; skipped 0.' })).toBeVisible();
-  await expect(page.locator('.trip-row').getByRole('heading', { name: title, exact: true })).toBeVisible();
+  expect((await (await page.request.get('/api/v1/trips?status=HISTORY')).json()).some((t: {title:string}) => t.title === title)).toBe(true);
   const exported = await (await page.request.get('/api/v1/exports/history.csv')).text();
   await panel.getByLabel('History CSV file').setInputFiles({ name: 'export.csv', mimeType: 'text/csv', buffer: Buffer.from(exported) });
   await panel.getByRole('button', { name: 'Preview import', exact: true }).click();
@@ -380,336 +384,4 @@ test('CSV import maps names, commits reviewed history and skips exported duplica
   await expect(panel.getByRole('button', { name: 'Commit 0 selected trips', exact: true })).toBeDisabled();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: `test-results/import-preview-${test.info().project.name}.png`, fullPage: true });
-});
-
-
-test('calendar always shows history and uses scenario inclusion for planned dates', async ({ page }) => {
-  const session = await (await page.request.get('/api/v1/auth/session')).json();
-  const profiles = await (await page.request.get('/api/v1/travellers')).json();
-  const headers = { 'X-Requested-With': 'SchengenPlanner', 'X-CSRF-Token': session.csrf_token };
-  const trips = [];
-  for (const [title, status, start, end] of [
-    ['Earliest calendar history', 'HISTORY', '2013-04-22', '2013-04-23'],
-    ['Future calendar plan', 'PLANNED', '2100-12-30', '2100-12-31'],
-  ]) {
-    const result = await page.request.post('/api/v1/trips', { headers, data: {
-      title, status, participants: [{ traveller_id: profiles[0].id, entry_date: start, exit_date: end,
-        segments: [{ country_code: 'FR', start_date: start, end_date: end }] }],
-    } });
-    expect(result.ok()).toBeTruthy(); trips.push(await result.json());
-  }
-  await page.reload();
-  const calendar = page.getByRole('region', { name: 'Travel calendar', exact: true });
-  await expect(calendar.getByRole('combobox')).toHaveCount(1);
-  await expect(calendar.getByRole('button', { name: 'Month view', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await calendar.getByLabel('Calendar month', { exact: true }).fill('2013-04');
-  await expect(calendar.getByLabel('Calendar month', { exact: true })).toHaveValue('2013-04');
-  const past = calendar.getByRole('button', { name: 'Inspect 2013-04-22', exact: true });
-  await expect(past.locator('.calendar-marker.history')).toHaveCount(1);
-  await expect(past).toHaveCSS('border-top-width', '2px');
-  await expect(past).toHaveCSS('border-top-color', 'rgb(119, 141, 130)');
-  await past.click();
-  await expect(calendar.getByRole('complementary')).toContainText('Earliest calendar history');
-  await calendar.getByLabel('Calendar month', { exact: true }).fill('2100-12');
-  await expect(calendar.getByLabel('Calendar month', { exact: true })).toHaveValue('2100-12');
-  const future = calendar.getByRole('button', { name: 'Inspect 2100-12-31', exact: true });
-  await expect(future.locator('.calendar-marker.plan')).toHaveCount(0);
-  await expect(future).toHaveCSS('border-top-color', 'rgb(216, 221, 211)');
-  await future.click();
-  await expect(calendar.getByRole('complementary')).not.toContainText('Future calendar plan');
-  const row = page.locator('.trip-row').filter({ has: page.getByRole('heading', { name: 'Future calendar plan', exact: true }) });
-  await row.getByRole('checkbox').check();
-  await expect(future.locator('.calendar-marker.plan')).toHaveCount(1);
-  await expect(future).toHaveCSS('border-top-color', 'rgb(119, 141, 130)');
-  await future.click();
-  await expect(calendar.getByRole('complementary')).toContainText('Future calendar plan');
-  await expect(calendar.getByRole('complementary')).toContainText('Included plan');
-  await calendar.getByRole('button', { name: 'Year view', exact: true }).click();
-  await expect(future).toHaveCSS('border-top-width', '2px');
-  await expect(future).toHaveCSS('border-top-color', 'rgb(119, 141, 130)');
-  await row.getByRole('checkbox').uncheck();
-  await expect(future.locator('.calendar-marker.plan')).toHaveCount(0);
-  await expect(future).toHaveCSS('border-top-color', 'rgb(216, 221, 211)');
-  await page.reload();
-  await expect(calendar.getByRole('button', { name: 'Year view', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await expect(calendar.getByRole('combobox', { name: 'Calendar year', exact: true })).toHaveValue('2100');
-  await calendar.getByRole('button', { name: 'Month view', exact: true }).click();
-  await calendar.getByLabel('Calendar month', { exact: true }).fill('2013-04');
-  await expect(calendar.getByRole('button', { name: 'Inspect 2013-04-21', exact: true })).toBeDisabled();
-  await expect(calendar.getByRole('button', { name: 'Inspect 2013-04-21', exact: true })).toHaveCSS('border-top-color', 'rgba(0, 0, 0, 0)');
-  await expect(past.locator('.calendar-marker.history')).toHaveCount(1);
-  await calendar.getByRole('button', { name: 'Year view', exact: true }).click();
-  await calendar.getByRole('combobox', { name: 'Calendar year', exact: true }).selectOption('2014');
-  await calendar.getByRole('button', { name: 'Previous', exact: true }).click();
-  await expect(calendar.getByRole('combobox', { name: 'Calendar year', exact: true })).toHaveValue('2013');
-  await expect(calendar.locator('.calendar-month')).toHaveCount(12);
-  await expect(past).toHaveCSS('border-top-color', 'rgb(119, 141, 130)');
-  await calendar.getByLabel('Calendar traveller').selectOption(profiles[1].id);
-  await expect(past).toHaveCSS('border-top-color', 'rgb(216, 221, 211)');
-  await calendar.getByLabel('Calendar traveller').selectOption('');
-  await expect(past).toHaveCSS('border-top-color', 'rgb(119, 141, 130)');
-  await expect(calendar.getByRole('button', { name: 'Inspect 2013-04-21', exact: true })).toHaveCSS('border-top-color', 'rgba(0, 0, 0, 0)');
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await calendar.screenshot({ path: test.info().outputPath('all-travel-calendar.png') });
-});
-
-
-test('calendar keeps the March–April scenario visible when a plan is edited or cancelled', async ({ page }) => {
-  const session = await (await page.request.get('/api/v1/auth/session')).json();
-  const [profile] = await (await page.request.get('/api/v1/travellers')).json();
-  const headers = { 'X-Requested-With': 'SchengenPlanner', 'X-CSRF-Token': session.csrf_token };
-  const saved = await page.request.post('/api/v1/trips', { headers, data: {
-    title: 'Spring 27', status: 'PLANNED', participants: [{ traveller_id: profile.id,
-      entry_date: '2027-03-14', exit_date: '2027-04-04',
-      segments: [{ country_code: 'FR', start_date: '2027-03-14', end_date: '2027-04-04' }] }],
-  } });
-  expect(saved.ok()).toBeTruthy();
-  const review = await page.request.patch(`/api/v1/travellers/${profile.id}`, { headers, data: {
-    display_name: profile.display_name, version: profile.version, notes: profile.notes,
-    rule_applicable: true, history_complete: true,
-  } });
-  expect(review.ok()).toBeTruthy();
-  await page.reload();
-  const calendar = page.getByRole('region', { name: 'Travel calendar', exact: true });
-  const row = page.locator('.trip-row').filter({ has: page.getByRole('heading', { name: 'Spring 27', exact: true }) });
-  const checkbox = row.getByRole('checkbox', { name: 'Include in scenario', exact: true });
-  await checkbox.check();
-  await calendar.getByRole('button', { name: 'Year view', exact: true }).click();
-  await calendar.getByRole('combobox', { name: 'Calendar year', exact: true }).selectOption('2027');
-  await expect(calendar.locator('.calendar-day.has-travel')).toHaveCount(22);
-  await expect(calendar.getByRole('button', { name: 'Inspect 2027-03-14', exact: true })).toHaveClass(/has-travel/);
-  await expect(calendar.getByRole('button', { name: 'Inspect 2027-03-14', exact: true }).locator('.calendar-marker.plan')).toHaveText('1');
-  await expect(calendar.getByRole('button', { name: 'Inspect 2027-04-04', exact: true })).toHaveClass(/has-travel/);
-  await expect(calendar.getByRole('button', { name: 'Inspect 2027-04-04', exact: true }).locator('.calendar-marker.plan')).toHaveText('22');
-  const editor = page.locator('.trip-editor');
-  await row.getByRole('button', { name: 'Edit Spring 27', exact: true }).click();
-  await expect(checkbox).toBeChecked();
-  await expect(editor.getByText('22 / 90', { exact: true })).toBeVisible();
-  await expect(calendar.locator('.calendar-day.has-travel')).toHaveCount(22);
-  await editor.getByRole('button', { name: 'Cancel', exact: true }).click();
-  await expect(checkbox).toBeChecked();
-  await row.getByRole('button', { name: 'Edit Spring 27', exact: true }).click();
-  await editor.getByRole('button', { name: 'Save plan', exact: true }).click();
-  await expect(checkbox).toBeChecked();
-  await expect(calendar.locator('.calendar-day.has-travel')).toHaveCount(22);
-  await page.reload();
-  await expect(checkbox).toBeChecked();
-  await expect(calendar.locator('.calendar-day.has-travel')).toHaveCount(22);
-  await calendar.getByRole('button', { name: 'Month view', exact: true }).click();
-  await calendar.getByLabel('Calendar month', { exact: true }).fill('2027-03');
-  await expect(calendar.locator('.calendar-day.has-travel')).toHaveCount(18);
-  await calendar.getByLabel('Calendar month', { exact: true }).fill('2027-04');
-  await expect(calendar.locator('.calendar-day.has-travel')).toHaveCount(4);
-});
-
-
-test('editing an existing different itinerary requires explicit shared-date review', async ({ page }) => {
-  const session = await (await page.request.get('/api/v1/auth/session')).json();
-  const people = await (await page.request.get('/api/v1/travellers')).json();
-  const headers = { 'X-Requested-With': 'SchengenPlanner', 'X-CSRF-Token': session.csrf_token };
-  const original = { title: 'Existing different dates', status: 'HISTORY', participants: [
-    { traveller_id: people[0].id, entry_date: '2026-05-01', exit_date: '2026-05-10',
-      segments: [{ country_code: 'FR', start_date: '2026-05-01', end_date: '2026-05-10' }] },
-    { traveller_id: people[1].id, entry_date: '2026-05-03', exit_date: '2026-05-08',
-      segments: [{ country_code: 'ES', start_date: '2026-05-03', end_date: '2026-05-08' }] },
-  ] };
-  const response = await page.request.post('/api/v1/trips', { headers, data: original });
-  expect(response.ok()).toBeTruthy();
-  const saved = await response.json();
-  const before = await (await page.request.get(`/api/v1/trips/${saved.id}`)).json();
-  await page.reload();
-  const row = page.locator('.trip-row').filter({ has: page.getByRole('heading', { name: original.title, exact: true }) });
-  const editor = page.locator('.trip-editor');
-  await row.getByRole('button', { name: `Edit ${original.title}`, exact: true }).click();
-  await expect(editor.getByLabel('Entry date', { exact: true })).toHaveCount(1);
-  await expect(editor.getByRole('button', { name: 'Save changes', exact: true })).toBeDisabled();
-  await editor.getByRole('button', { name: 'Cancel', exact: true }).click();
-  const unchanged = await (await page.request.get(`/api/v1/trips/${saved.id}`)).json();
-  expect(unchanged).toEqual(before);
-  await row.getByRole('button', { name: `Edit ${original.title}`, exact: true }).click();
-  await editor.getByRole('combobox', { name: 'Copy existing itinerary from', exact: true }).selectOption(people[1].id);
-  await expect(editor.getByLabel('Entry date', { exact: true })).toHaveValue('2026-05-03');
-  await editor.getByLabel('Apply the shared dates and destinations to every selected traveller', { exact: true }).check();
-  await editor.getByRole('button', { name: 'Save changes', exact: true }).click();
-  await expect(editor).toHaveCount(0);
-  const updated = await (await page.request.get(`/api/v1/trips/${saved.id}`)).json();
-  expect(updated.participants).toHaveLength(2);
-  for (const person of updated.participants) {
-    expect(person.entry_date).toBe('2026-05-03');
-    expect(person.exit_date).toBe('2026-05-08');
-    expect(person.segments.map(s => s.country_code)).toEqual(['ES']);
-  }
-});
-
-test('Gantt handles resize shared dates, trim destinations and persist after reload', async ({ page }) => {
-  const session = await (await page.request.get('/api/v1/auth/session')).json();
-  const profiles = await (await page.request.get('/api/v1/travellers')).json();
-  const created = await page.request.post('/api/v1/trips', {
-    headers: { 'X-Requested-With': 'SchengenPlanner', 'X-CSRF-Token': session.csrf_token },
-    data: { title: 'Resizable shared trip', status: 'PLANNED', participants: profiles.map((p: { id: string }) => ({
-      traveller_id: p.id, entry_date: '2028-03-10', exit_date: '2028-03-20', segments: [
-        { country_code: 'GB', start_date: '2028-03-10', end_date: '2028-03-14' },
-        { country_code: 'ES', start_date: '2028-03-15', end_date: '2028-03-20' },
-      ],
-    })) },
-  });
-  expect(created.ok()).toBeTruthy();
-  const original = await created.json();
-  await page.reload();
-  await page.locator('.trip-row').filter({ has: page.getByRole('heading', { name: original.title, exact: true }) })
-    .getByRole('checkbox', { name: 'Include in scenario', exact: true }).check();
-  const calendar = page.getByRole('region', { name: 'Travel calendar', exact: true });
-  await calendar.getByRole('button', { name: 'Gantt view', exact: true }).click();
-  await calendar.getByRole('combobox', { name: 'Calendar year', exact: true }).selectOption('2028');
-  const timeline = calendar.getByRole('region', { name: 'Year travel timeline', exact: true });
-  await expect(timeline.locator('.gantt-trip')).toHaveCount(2);
-  // Country/assessment colour runs must retain their actual day widths.
-  const widths = await timeline.locator('.gantt-trip').first().locator('.gantt-bar').evaluateAll(bars => bars.map(bar => bar.getBoundingClientRect().width));
-  expect(widths).toEqual([80, 96]);
-  async function dragHandle(edge: 'start' | 'end', days: number) {
-    const handle = timeline.getByRole('button', { name: `${profiles[0].display_name}: Change ${edge} of ${original.title}`, exact: true });
-    await expect(handle).toBeEnabled();
-    await handle.scrollIntoViewIfNeeded();
-    await handle.evaluate(el => {
-      const scroller = el.closest('.gantt-scroll')!;
-      const bounds = scroller.getBoundingClientRect();
-      const target = bounds.left + 144 + (bounds.width - 144) / 2;
-      scroller.scrollLeft += el.getBoundingClientRect().x + 6 - target;
-    });
-    const scrollBefore = await timeline.evaluate(el => el.scrollLeft);
-    const box = (await handle.boundingBox())!;
-    const x = box.x + box.width / 2, y = box.y + box.height / 2;
-    const response = page.waitForResponse(r => r.url().endsWith(`/trips/${original.id}`) && r.request().method() === 'PATCH');
-    if (test.info().project.name === 'mobile-320') {
-      const cdp = await page.context().newCDPSession(page);
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + days * 16, y }] });
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-      await cdp.detach();
-    } else {
-      await page.mouse.move(x, y); await page.mouse.down();
-      await page.mouse.move(x + days * 16, y); await page.mouse.up();
-    }
-    expect((await response).ok()).toBeTruthy();
-    await expect(calendar.getByRole('status').filter({ hasText: 'Saved Resizable shared trip' })).toBeVisible();
-    await expect(timeline.locator('.gantt-trip')).toHaveCount(2);
-    expect(await timeline.evaluate(el => el.scrollLeft)).toBe(scrollBefore);
-  }
-  await dragHandle('end', 2);
-  let saved = await (await page.request.get(`/api/v1/trips/${original.id}`)).json();
-  for (const p of saved.participants) {
-    expect(p.exit_date).toBe('2028-03-22');
-    expect(p.segments.at(-1).end_date).toBe('2028-03-22');
-  }
-  // Drag across the first destination: it is trimmed, not left outside the new dates.
-  if (test.info().project.name === 'mobile-320') {
-    // Keep each gesture inside the narrow viewport, away from automatic edge scrolling.
-    for (let day = 0; day < 6; day++) await dragHandle('start', 1);
-  } else await dragHandle('start', 6);
-  saved = await (await page.request.get(`/api/v1/trips/${original.id}`)).json();
-  for (const p of saved.participants) {
-    expect(p.entry_date).toBe('2028-03-16');
-    expect(p.segments).toEqual([expect.objectContaining({ country_code: 'ES', start_date: '2028-03-16', end_date: '2028-03-22' })]);
-  }
-  const handle = timeline.getByRole('button', { name: `${profiles[0].display_name}: Change start of ${original.title}`, exact: true });
-  await handle.focus(); await handle.press('ArrowLeft');
-  await expect.poll(async () => (await (await page.request.get(`/api/v1/trips/${original.id}`)).json()).participants[0].entry_date).toBe('2028-03-15');
-  await page.screenshot({ path: test.info().outputPath('gantt-resized.png'), fullPage: true });
-  await page.reload();
-  await expect(timeline.locator('.gantt-bar')).toHaveCount(2);
-  for (const bar of await timeline.locator('.gantt-bar').all()) await expect(bar).toContainText('15 03 → 22 03');
-});
-
-test('Gantt drag cancellation and stale saves leave stored dates unchanged', async ({ page }) => {
-  const session = await (await page.request.get('/api/v1/auth/session')).json();
-  const profiles = await (await page.request.get('/api/v1/travellers')).json();
-  const created = await page.request.post('/api/v1/trips', {
-    headers: { 'X-Requested-With': 'SchengenPlanner', 'X-CSRF-Token': session.csrf_token },
-    data: { title: 'Protected dates', status: 'HISTORY', participants: [{ traveller_id: profiles[0].id,
-      entry_date: '2028-03-10', exit_date: '2028-03-20',
-      segments: [{ country_code: 'FR', start_date: '2028-03-10', end_date: '2028-03-20' }] }] },
-  });
-  const trip = await created.json();
-  await page.reload();
-  const calendar = page.getByRole('region', { name: 'Travel calendar', exact: true });
-  await calendar.getByRole('button', { name: 'Gantt view', exact: true }).click();
-  await calendar.getByRole('combobox', { name: 'Calendar year', exact: true }).selectOption('2028');
-  const timeline = calendar.getByRole('region', { name: 'Year travel timeline', exact: true });
-  const handle = timeline.getByRole('button', { name: `${profiles[0].display_name}: Change end of ${trip.title}`, exact: true });
-  await expect(handle).toBeEnabled();
-  await handle.scrollIntoViewIfNeeded();
-  await handle.evaluate(el => {
-    const scroller = el.closest('.gantt-scroll')!;
-    const bounds = scroller.getBoundingClientRect();
-    scroller.scrollLeft += el.getBoundingClientRect().x + 6 - (bounds.left + 144 + (bounds.width - 144) / 2);
-  });
-  const box = (await handle.boundingBox())!;
-  if (test.info().project.name === 'mobile-320') {
-    const cdp = await page.context().newCDPSession(page);
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: box.x + 6, y: box.y + 15 }] });
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: box.x + 22, y: box.y + 15 }] });
-    await expect(timeline.locator('.gantt-preview')).toBeVisible();
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] });
-    await cdp.detach();
-  } else {
-    await page.mouse.move(box.x + 6, box.y + 15); await page.mouse.down();
-    await page.mouse.move(box.x + 22, box.y + 15);
-    await expect(timeline.locator('.gantt-preview')).toBeVisible();
-    await page.keyboard.press('Escape'); await page.mouse.up();
-  }
-  await expect(timeline.locator('.gantt-preview')).toHaveCount(0);
-  expect((await (await page.request.get(`/api/v1/trips/${trip.id}`)).json()).version).toBe(trip.version);
-  // An update in another tab makes this chart's version stale.
-  const updated = await page.request.patch(`/api/v1/trips/${trip.id}`, {
-    headers: { 'X-Requested-With': 'SchengenPlanner', 'X-CSRF-Token': session.csrf_token },
-    data: { title: trip.title, status: trip.status, participants: trip.participants.map((p: { traveller_id: string; entry_date: string; exit_date: string; segments: { country_code: string; start_date: string; end_date: string }[] }) => ({
-      traveller_id: p.traveller_id, entry_date: p.entry_date, exit_date: p.exit_date,
-      segments: p.segments.map(segment => ({ country_code: segment.country_code, start_date: segment.start_date, end_date: segment.end_date })),
-    })), version: trip.version },
-  });
-  expect(updated.ok()).toBeTruthy();
-  await handle.focus(); await handle.press('ArrowRight');
-  await expect(calendar.getByRole('alert')).toContainText('The drag was not saved');
-  await expect(timeline.locator('.gantt-bar')).toContainText('10 03 → 20 03');
-  const saved = await (await page.request.get(`/api/v1/trips/${trip.id}`)).json();
-  expect(saved.participants[0].exit_date).toBe('2028-03-20');
-  expect(saved.version).toBe(trip.version + 1);
-});
-
-test('calendar separates unused rolling days from extra capacity reserved by later plans', async ({ page }) => {
-  const session = await (await page.request.get('/api/v1/auth/session')).json();
-  const headers = { 'X-Requested-With': 'SchengenPlanner', 'X-CSRF-Token': session.csrf_token };
-  const profiles = await (await page.request.get('/api/v1/travellers')).json();
-  for (const [title, start, end] of [
-    ['Spring capacity', '2027-02-26', '2027-04-11'],
-    ['Summer capacity', '2027-06-11', '2027-07-25'],
-  ]) {
-    const saved = await page.request.post('/api/v1/trips', { headers, data: {
-      title, status: 'PLANNED', participants: profiles.map((p: { id: string }) => ({
-        traveller_id: p.id, entry_date: start, exit_date: end,
-        segments: [{ country_code: 'FR', start_date: start, end_date: end }],
-      })),
-    } });
-    expect(saved.ok()).toBeTruthy();
-  }
-  for (const profile of profiles) {
-    const result = await page.request.patch(`/api/v1/travellers/${profile.id}`, { headers, data: {
-      display_name: profile.display_name, rule_applicable: true, history_complete: true,
-      notes: profile.notes, version: profile.version,
-    } });
-    expect(result.ok()).toBeTruthy();
-  }
-  await page.reload();
-  for (const title of ['Spring capacity', 'Summer capacity']) {
-    await page.locator('.trip-row').filter({ has: page.getByRole('heading', { name: title, exact: true }) })
-      .getByRole('checkbox', { name: 'Include in scenario', exact: true }).check();
-  }
-  const calendar = page.getByRole('region', { name: 'Travel calendar', exact: true });
-  await calendar.getByRole('button', { name: 'Month view', exact: true }).click();
-  await calendar.getByLabel('Calendar month', { exact: true }).fill('2027-05');
-  await calendar.getByRole('button', { name: 'Inspect 2027-05-15', exact: true }).click();
-  const details = page.getByRole('complementary', { name: 'Selected calendar day' });
-  await expect(details.getByText(/45 days unused in this 180-day window/)).toHaveCount(2);
-  await expect(details.getByText('Extra consecutive Schengen days you can add from this date: 0.', { exact: true })).toHaveCount(2);
-  await expect(calendar.getByRole('button', { name: 'Inspect 2027-05-15', exact: true }).locator('.calendar-marker.unavailable')).toHaveCount(2);
 });

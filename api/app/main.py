@@ -1,4 +1,5 @@
 import hashlib
+import re
 import secrets
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
@@ -17,6 +18,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.config import Settings
 from app.models import AuditEvent, HouseholdUser, Session, Traveller
+from app.services.proofs import MAX_PROOF_BYTES, ProofStorage
 from app.travel_api import travel_router
 
 COOKIE_NAME = "schengen_session"
@@ -65,7 +67,7 @@ def create_app(settings: Settings | None = None, *, engine=None) -> FastAPI:
     sessions = sessionmaker(engine, expire_on_commit=False)
     app = FastAPI(
         title="Schengen Travel Planner",
-        version="1.0.0",
+        version="1.1.0",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -96,14 +98,19 @@ def create_app(settings: Settings | None = None, *, engine=None) -> FastAPI:
     async def request_security(request: Request, call_next):
         chunks = []
         size = 0
+        proof_upload = request.method == "POST" and re.fullmatch(
+            r"/api/v1/trips/[0-9a-fA-F-]{36}/proofs", request.url.path
+        )
+        limit = 16_384
+        if proof_upload:
+            limit = MAX_PROOF_BYTES
+        elif request.url.path in {
+            "/api/v1/imports/history/preview",
+            "/api/v1/imports/history/commit",
+        }:
+            limit = 1_048_576
         async for chunk in request.stream():
             size += len(chunk)
-            limit = (
-                1_048_576
-                if request.url.path
-                in {"/api/v1/imports/history/preview", "/api/v1/imports/history/commit"}
-                else 16_384
-            )
             if size > limit:
                 return Response(status_code=413)
             chunks.append(chunk)
@@ -135,7 +142,7 @@ def create_app(settings: Settings | None = None, *, engine=None) -> FastAPI:
 
     @app.get("/api/v1/health/live")
     def live():
-        return {"status": "ok", "version": "1.0.0"}
+        return {"status": "ok", "version": "1.1.0"}
 
     @app.get("/api/v1/health/ready")
     def ready(db: DBSession = Depends(database)):
@@ -262,5 +269,7 @@ def create_app(settings: Settings | None = None, *, engine=None) -> FastAPI:
         db.commit()
         return traveller
 
-    app.include_router(travel_router(database, authenticated))
+    app.include_router(
+        travel_router(database, authenticated, ProofStorage(settings.proof_storage_path))
+    )
     return app

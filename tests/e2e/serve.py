@@ -24,5 +24,5 @@ with tempfile.TemporaryDirectory(prefix="schengen-e2e-") as directory:
     command.upgrade(Config(str(ROOT / "api/alembic.ini")), "head")
     with Session(create_engine(url)) as db:
         provision(db, "test-household", "test-only-household-password")
-    app = create_app(Settings(url, secure_cookie=False))
+    app = create_app(Settings(url, secure_cookie=False, proof_storage_path=f"{directory}/proofs"))
     uvicorn.run(app, host="127.0.0.1", port=18080, access_log=False)

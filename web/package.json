@@ -1,12 +1,13 @@
 {
   "name": "schengen-travel-planner-web",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "test:e2e": "playwright test",
+    "screenshots:readme": "playwright test --config playwright.screenshots.config.ts",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {

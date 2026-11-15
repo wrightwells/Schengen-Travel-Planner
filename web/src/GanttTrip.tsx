@@ -9,9 +9,10 @@ const shift = (date: string, days: number) => new Date(Date.parse(date) + days *
 const display = (date: string) => `${date.slice(8)} ${date.slice(5, 7)}`;
 const fullDate = (date: string) => `${display(date)} ${date.slice(0, 4)}`;
 
-export function GanttTrip({ trip, participant, name, year, runs, disabled, onSelect, onResize }: {
+export function GanttTrip({ trip, participant, name, year, runs, disabled, onSelect, onResize, onPreviewResize }: {
   trip: Trip; participant: Participant; name: string; year: number; runs: Run[]; disabled: boolean;
   onSelect: (date: string) => void;
+  onPreviewResize: (trip: Trip, travellerId: string, edge: Edge, date: string) => Promise<string>;
   onResize: (trip: Trip, travellerId: string, edge: Edge, date: string) => Promise<void>;
 }) {
   const [preview, setPreview] = useState<{ edge: Edge; date: string } | null>(null);
@@ -19,6 +20,14 @@ export function GanttTrip({ trip, participant, name, year, runs, disabled, onSel
     original: string; moved: boolean; scroller: HTMLElement; pointerId: number; handle: HTMLButtonElement } | null>(null);
   const [dragging, setDragging] = useState(false);
   const [pending, setPending] = useState(false);
+  const [assessment, setAssessment] = useState('');
+  useEffect(() => {
+    if (!preview) return;
+    let active = true;
+    setAssessment('Checking eligibility…');
+    const timer = setTimeout(() => { void onPreviewResize(trip, participant.traveller_id, preview.edge, preview.date).then(value => { if (active) setAssessment(value); }); }, 250);
+    return () => { active = false; clearTimeout(timer); };
+  }, [preview?.date, preview?.edge]);
   const lower = `${year}-01-01`, upper = `${year}-12-31`;
   const start = preview?.edge === 'start' ? preview.date : participant.entry_date;
   const end = preview?.edge === 'end' ? preview.date : participant.exit_date;
@@ -32,7 +41,7 @@ export function GanttTrip({ trip, participant, name, year, runs, disabled, onSel
     const current = drag.current;
     if (!current) return;
     const date = clamp(current.edge, shift(current.original,
-      Math.round((current.pointerX - current.x + current.scroller.scrollLeft - current.scroll) / 16)));
+      Math.round((current.pointerX - current.x + current.scroller.scrollLeft - current.scroll) / 24)));
     if (date !== current.date) {
       current.date = date;
       setPreview({ edge: current.edge, date });
@@ -53,7 +62,7 @@ export function GanttTrip({ trip, participant, name, year, runs, disabled, onSel
       if (!current.moved) { frame = requestAnimationFrame(scroll); return; }
       const bounds = current.scroller.getBoundingClientRect();
       // Leave room for the sticky traveller label when scrolling towards January.
-      const left = bounds.left + 144;
+      const left = bounds.left + 112;
       const amount = current.pointerX < left + 24 ? -8 : current.pointerX > bounds.right - 24 ? 8 : 0;
       if (amount) { current.scroller.scrollLeft += amount; update(); }
       frame = requestAnimationFrame(scroll);
@@ -114,6 +123,6 @@ export function GanttTrip({ trip, participant, name, year, runs, disabled, onSel
           setPreview({ edge, date }); void save(edge, date);
         }}><span aria-hidden="true">⋮</span></button>;
     })}
-    {preview && <span className="gantt-resize-dates" role="status">{fullDate(start)} → {fullDate(end)}{pending ? ' · Saving…' : ''}</span>}
+    {preview && <span className="gantt-resize-dates" role="status">{fullDate(start)} → {fullDate(end)}{pending ? ' · Preparing review…' : ''}<span className="drag-assessment">{assessment}</span></span>}
   </div>;
 }

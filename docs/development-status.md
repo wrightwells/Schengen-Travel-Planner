@@ -1,5 +1,29 @@
 # Development status
 
+## v1.1.0 — produstion v1.1 (15 November 2026)
+
+This release packages the responsive Home/History/Planner/More workspace, shared
+itinerary review, private proof documents and command-line password management.
+Proof bytes and metadata remain on disk, with authenticated downloads, private
+permissions, atomic writes, symlink checks and a tick on history entries with
+uploaded evidence. The API container uses a private proof volume and a read-only
+root filesystem. An optional host-folder override includes setup and migration
+instructions.
+
+The README now includes fictional-data app screenshots and architecture diagrams,
+with detailed usage, API and deployment references in separate guides. API, web,
+lockfile and release image versions are aligned to `1.1.0`; release notes and build
+outputs are described in [the release notes](releases/v1.1.0.md).
+
+Pre-release local validation passed all 92 API tests, Python lint/format checks,
+lockfile verification, the frontend build and all Compose variants. The release
+workflow also runs the complete desktop/mobile browser suite before publication.
+
+The historical milestone and validation entries below record earlier development
+states. Remaining limits include browser-local scenarios, a two-person household,
+explicit history completeness review, and the documented Tailscale/restore
+hardening work.
+
 ## Milestone 4 — travel export and import
 
 Implemented:

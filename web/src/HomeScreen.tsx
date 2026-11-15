@@ -1,0 +1,32 @@
+import type { Assessment, Summary, Traveller, Trip } from './api';
+import { formatDate, Icon } from './Design';
+export function HomeScreen({ travellers, selected, summary, trips, includedPlans, assessments, onManage, onPlan, onTrip, onPlanner }: {
+  travellers: Traveller[]; selected: string; summary: Summary | null; trips: Trip[]; includedPlans: string[];
+  assessments: Record<string, Assessment[] | string>; onManage: () => void; onPlan: () => void; onTrip: (trip: Trip) => void; onPlanner: () => void;
+}) {
+  const people = travellers;
+  const upcoming = trips.filter(t => t.status === 'PLANNED' && t.participants.some(p => (!selected || p.traveller_id === selected) && p.exit_date >= (summary?.reference_date || ''))).sort((a,b) => a.participants[0].entry_date.localeCompare(b.participants[0].entry_date)).slice(0,3);
+  return <section className="home-screen" aria-labelledby="home-heading">
+    <div className="section-heading"><div><span className="eyebrow">A LITTLE PLANNING. MORE POSSIBILITY.</span><h1 id="home-heading">Your next chapter, in reach.</h1><p className="intro">A clear view of your days in Schengen.</p></div><span className="date-label">{summary ? formatDate(summary.reference_date) : 'Today'}</span></div>
+    <button className="household-link" onClick={onManage}><span className="avatar"><Icon name="people" /></span><span><strong>Household</strong><small>Two travellers · Individual allowances</small></span><Icon name="arrow" /></button>
+    <div className={`allowance-cards ${selected ? 'single-selection' : ''}`}>{people.map(person => {
+      const totals = summary?.travellers.find(p => p.traveller_id === person.id);
+      const assessed = person.history_complete && person.rule_applicable === true && !!totals;
+      const used = totals?.used_days;
+      const state = !assessed ? 'unknown' : used! > 90 ? 'danger' : used! >= 75 ? 'caution' : 'normal';
+      const stateLabel = !assessed ? 'Unassessed · Review your history' : used! > 90 ? 'Over the rolling limit' : used === 90 ? 'At the rolling limit' : used! >= 75 ? 'Approaching the limit' : 'Within your rolling allowance';
+      const arc = Math.min((used || 0) / 90, 1) * 314.159;
+      return <div className={`allowance-group ${!selected || selected === person.id ? 'is-selected' : 'is-other'}`} key={person.id}><article className={`allowance-card ${state}`} aria-label={`${person.display_name} allowance`}>
+        <div className="allowance-heading"><div><span className="eyebrow">YOUR SCHENGEN ALLOWANCE</span><h2>{person.display_name}</h2><span className="field-note">{person.rule_applicable === true ? 'Standard 90/180 rule' : 'Rule needs review'}</span></div><Icon name="globe" size={28} /></div>
+        <div className="allowance-visual"><div className="progress-ring" role="img" aria-label={`${person.display_name}. ${used ?? 'Unavailable'} Schengen days used out of 90. ${assessed ? totals?.remaining_days : 'Unassessed'} days numerically remaining, based on confirmed travel as of ${summary ? formatDate(summary.reference_date) : 'today'}.`}>
+          <svg viewBox="0 0 120 120" aria-hidden="true"><circle className="ring-track" cx="60" cy="60" r="50" /><circle className="ring-fill" cx="60" cy="60" r="50" strokeDasharray={`${arc} 314.159`} style={{ opacity: used ? 1 : 0 }} /></svg><div><strong>{used ?? '—'}<span> / 90</span></strong><small>days used</small></div></div>
+          <div className="remaining"><strong>{assessed ? totals?.remaining_days : '—'}</strong><span>Remaining days</span><small>in this rolling window</small></div></div>
+        <p className={`allowance-status ${state}`}><span aria-hidden="true">{!assessed ? '○' : state === 'danger' || state === 'caution' ? '!' : '✓'}</span>{stateLabel}</p>
+        <p className="allowance-footer">As of {summary ? formatDate(summary.reference_date) : '—'} · Confirmed history only</p>
+      </article><button className={`history-verification ${person.history_complete ? 'reviewed' : ''}`} onClick={onManage}><Icon name={person.history_complete ? 'check' : 'warning'} /><span><strong>{person.history_complete ? 'History reviewed' : 'History needs review'}</strong><small>{person.history_complete ? 'Recheck completeness whenever you add or correct a trip.' : 'Allowance results may be incomplete. Review your recorded travel.'}</small></span><Icon name="arrow" size={18} /></button></div>;
+    })}</div>
+    <div className="section-heading upcoming-heading"><div><span className="eyebrow">SOMETHING TO LOOK FORWARD TO</span><h2>Upcoming trips</h2></div><button className="text-button" onClick={onPlanner}>View all <Icon name="arrow" size={16} /></button></div>
+    {!upcoming.length ? <div className="empty-state"><Icon name="planner" size={32} /><h3>Where will you go next?</h3><p>Your next adventure starts with a few dates.</p><button onClick={onPlan}>Plan a trip</button></div> : <ul className="upcoming-list">{upcoming.map(trip => <li key={trip.id}><button className="upcoming-card" onClick={() => onTrip(trip)}><span className="trip-icon"><Icon name="planner" /></span><span className="upcoming-copy"><strong>{trip.title}</strong>{trip.participants.filter(p => !selected || p.traveller_id === selected).map(p => <span key={p.traveller_id}>{!selected && `${travellers.find(t => t.id === p.traveller_id)?.display_name} · `}{[...new Set(p.segments.map(s => s.country_name || s.country_code))].join(', ')}<small>{formatDate(p.entry_date)} – {formatDate(p.exit_date)} · {p.schengen_days} Schengen days</small></span>)}<small className="scenario-chip">{includedPlans.includes(trip.id) ? 'Included in scenario' : 'Excluded from scenario'}</small><span className="eligibility-line">{Array.isArray(assessments[trip.id]) ? (assessments[trip.id] as Assessment[]).filter(p => !selected || p.traveller_id === selected).map(p => <small key={p.traveller_id} className={`eligibility ${p.status.toLowerCase()}`}>{p.display_name} · {p.status === 'PERMITTED' ? 'Eligible' : p.status === 'APPROACHING_LIMIT' ? 'Eligible · Near limit' : p.status === 'OVER_LIMIT' ? `Over limit from ${formatDate(p.first_breach_date!)}` : 'Unassessed'}</small>) : <small>{typeof assessments[trip.id] === 'string' ? String(assessments[trip.id]) : 'Checking eligibility…'}</small>}</span></span><Icon name="arrow" size={18} /></button></li>)}</ul>}
+    <p className="field-note">A remaining balance is a snapshot, not permission for a new trip. The planner checks every travel day and protects your selected future plans.</p>
+  </section>;
+}

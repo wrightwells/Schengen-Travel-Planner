@@ -13,6 +13,7 @@ services:
     command: ["/app/.venv/bin/alembic", "upgrade", "head"]
     environment: &local-api-environment
       DATABASE_URL: postgresql+psycopg://planner:${DB_PASSWORD:?Use --env-file .env.local}@db:5432/planner
+      PROOF_STORAGE_PATH: /app/proofs
       ALLOWED_HOSTS: localhost,127.0.0.1,${PLANNER_TAILSCALE_HOST:-localhost}
       COOKIE_SECURE: ${PLANNER_COOKIE_SECURE:-false}
     networks: [backend]
@@ -23,6 +24,12 @@ services:
   api:
     build: ./api
     environment: *local-api-environment
+    volumes:
+      # Optional host folder: add -f compose.proofs-host.yaml (see README).
+      - proofdata:/app/proofs
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     networks: [backend]
     depends_on:
       migrate:
@@ -50,4 +57,5 @@ networks:
   backend:
     internal: true
 volumes:
+  proofdata:
   pgdata:

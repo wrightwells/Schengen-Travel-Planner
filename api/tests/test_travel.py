@@ -274,3 +274,22 @@ def test_full_trip_search_rechecks_country_membership_after_shift(environment):
     assessment = response.json()["travellers"][0]
     assert assessment["first_breach_date"] == "2023-01-02"
     assert assessment["earliest_full_trip_entry"] == "2023-03-29"
+
+
+def test_trip_preview_counts_shared_boundaries_without_saving(environment):
+    client, _ = environment
+    assert client.post("/api/v1/trips/preview", headers=HEADERS, json={}).status_code == 401
+    headers = sign_in(client)
+    a, b = client.get("/api/v1/travellers").json()
+    candidate = draft(a["id"], "2027-01-01", "2027-01-03")
+    candidate["participants"][0]["segments"] = [
+        {"country_code": "FR", "start_date": "2027-01-01", "end_date": "2027-01-02"},
+        {"country_code": "ES", "start_date": "2027-01-02", "end_date": "2027-01-03"},
+    ]
+    candidate["participants"] += draft(b["id"], "2027-01-01", "2027-01-03", code="GB")[
+        "participants"
+    ]
+    result = client.post("/api/v1/trips/preview", headers=headers, json={"candidate": candidate})
+    assert result.status_code == 200
+    assert [p["schengen_days"] for p in result.json()["participants"]] == [3, 0]
+    assert client.get("/api/v1/trips").json() == []

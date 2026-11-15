@@ -8,5 +8,7 @@ COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
 RUN groupadd --gid 10001 planner && useradd --uid 10001 --gid planner --no-create-home planner
+RUN mkdir -p /app/proofs && chown planner:planner /app/proofs && chmod 700 /app/proofs
+ENV PROOF_STORAGE_PATH=/app/proofs
 USER planner
 CMD ["/app/.venv/bin/uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

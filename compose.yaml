@@ -17,16 +17,17 @@ services:
     restart: unless-stopped
 
   web:
-    image: ghcr.io/wrightwells/schengen-travel-planner-web:v1.0.0
+    image: ghcr.io/wrightwells/schengen-travel-planner-web:v1.1.0
     network_mode: service:tailscale
     depends_on: [tailscale, api]
     restart: unless-stopped
 
   migrate:
-    image: ghcr.io/wrightwells/schengen-travel-planner-api:v1.0.0
+    image: ghcr.io/wrightwells/schengen-travel-planner-api:v1.1.0
     command: ["/app/.venv/bin/alembic", "upgrade", "head"]
     environment: &api-environment
       DATABASE_URL: postgresql+psycopg://planner:${DB_PASSWORD:?Set DB_PASSWORD in .env}@db:5432/planner
+      PROOF_STORAGE_PATH: /app/proofs
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1}
       COOKIE_SECURE: "true"
     networks: [backend]
@@ -35,8 +36,14 @@ services:
         condition: service_healthy
 
   api:
-    image: ghcr.io/wrightwells/schengen-travel-planner-api:v1.0.0
+    image: ghcr.io/wrightwells/schengen-travel-planner-api:v1.1.0
     environment: *api-environment
+    volumes:
+      # Optional host folder: add -f compose.proofs-host.yaml (see README).
+      - proofdata:/app/proofs
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     networks: [backend]
     depends_on:
       migrate:
@@ -64,5 +71,6 @@ networks:
     internal: true
   egress: {}
 volumes:
+  proofdata:
   pgdata:
   tailscale-state:

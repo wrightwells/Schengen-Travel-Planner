@@ -27,4 +27,5 @@ coverage/
 test-results/
 playwright-report/
 backups/
+proofs/
 !.env.example

@@ -2,7 +2,11 @@ import { useEffect, useId, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { api, ApiError } from './api';
 import { TravelCalendar } from './TravelCalendar';
-import type { Assessment, Country, Participant, Segment, Traveller, Trip, TripDraft } from './api';
+import { HomeScreen } from './HomeScreen';
+import { ProofDocuments } from './ProofDocuments';
+import { formatDate, Icon, Sheet } from './Design';
+import type { Screen, PlannerView } from './Design';
+import type { Assessment, Country, Participant, Segment, Traveller, Trip, TripDraft, Summary } from './api';
 
 const message = (error: unknown) => error instanceof Error ? error.message : 'Please retry.';
 const blankParticipant = (id: string, day: string): Participant => ({
@@ -25,11 +29,11 @@ const itineraryKey = (p: Itinerary) => JSON.stringify({ ...copyItinerary(p),
   segments: [...p.segments].map(s => [s.country_code, s.start_date, s.end_date]).sort(),
 });
 type Editor = { draft: TripDraft; id?: string; version?: number; confirming?: boolean;
-  itinerary?: Itinerary; originalParticipants?: Participant[]; requiresSharedReview?: boolean };
+  itinerary?: Itinerary; originalParticipants?: Participant[]; requiresSharedReview?: boolean; resizeReview?: string };
 
 
-function CountryInput({ value, onChange, countries, label }: {
-  value: string; onChange: (value: string) => void; countries: Country[]; label: string;
+function CountryInput({ value, onChange, countries, label, day }: {
+  value: string; onChange: (value: string) => void; countries: Country[]; label: string; day: string;
 }) {
   const country = countries.find(c => c.code === value);
   const id = useId();
@@ -38,7 +42,7 @@ function CountryInput({ value, onChange, countries, label }: {
     value={country?.name || value} onChange={event => {
       const text = event.target.value;
       onChange(countries.find(c => c.name.toLowerCase() === text.toLowerCase() || c.code === text.toUpperCase())?.code || text);
-    }} />{country?.note && <small id={`${id}-note`} className="field-note">{country.note}</small>}</div>;
+    }} />{country && <small className="field-note">{country.memberships.find(m => m.effective_from <= day && (!m.effective_to || m.effective_to >= day))?.is_schengen ? 'Schengen destination · Days count towards your allowance' : 'Non-Schengen destination · Days do not consume your allowance'}</small>}{country?.note && <small id={`${id}-note`} className="field-note">{country.note}</small>}</div>;
 }
 
 function ItineraryEditor({ participant, onChange, countries }: {
@@ -52,17 +56,18 @@ function ItineraryEditor({ participant, onChange, countries }: {
   function changeSegment(index: number, value: Partial<Segment>) {
     onChange({ ...participant, segments: participant.segments.map((segment, i) => i === index ? { ...segment, ...value } : segment) });
   }
-  return <fieldset className="participant-editor shared-itinerary"><legend>Trip dates and destinations</legend>
+  return <fieldset className="participant-editor shared-itinerary"><legend>2 · Travel dates &amp; 3 · Destinations</legend>
     <div className="date-pair"><label>Entry date<input type="date" value={participant.entry_date} required min="2013-04-22" max="2100-12-31"
       onChange={e => changeDate('entry_date', e.target.value)} /></label>
       <label>Exit date<input type="date" value={participant.exit_date} required min={participant.entry_date || '2013-04-22'} max="2100-12-31"
         onChange={e => changeDate('exit_date', e.target.value)} /></label></div>
+    <p className="duration-note">{participant.entry_date && participant.exit_date && participant.exit_date >= participant.entry_date ? `${Math.round((Date.parse(participant.exit_date) - Date.parse(participant.entry_date)) / 86400000) + 1} calendar days · Entry and exit included` : 'Choose an inclusive date range'}</p>
     {participant.segments.map((segment, index) => <div className="segment-editor" key={index}>
       <div className="segment-heading"><strong>Destination {index + 1}</strong>{participant.segments.length > 1 &&
         <button type="button" className="text-button" aria-label={`Remove destination ${index + 1}`}
           onClick={() => onChange({ ...participant, segments: participant.segments.filter((_, i) => i !== index) })}>Remove</button>}</div>
       <CountryInput value={segment.country_code} onChange={value => changeSegment(index, { country_code: value })}
-        countries={countries} label="Country" />
+        countries={countries} day={segment.start_date} label="Country" />
       {participant.segments.length > 1 && <div className="date-pair">
         <label>Country arrival<input type="date" value={segment.start_date} required min={participant.entry_date}
           max={participant.exit_date} onChange={e => changeSegment(index, { start_date: e.target.value })} /></label>
@@ -85,11 +90,12 @@ const statusText: Record<string, string> = {
 
 function Results({ results, loading, error }: { results: Assessment[] | null; loading: boolean; error: string }) {
   return <aside className="scenario-results" aria-live="polite" aria-label="Scenario assessment">
-    <span className="eyebrow">YOUR SELECTED SCENARIO</span><h3>Before you book</h3>
+    <span className="eyebrow">4 · REVIEW YOUR SCENARIO</span><h3>Before you book</h3>
     {loading ? <p role="status">Checking every day of the itinerary…</p> : error ? <p className="error" role="alert">{error}</p>
       : !results ? <p>Add travellers, dates and countries to preview the whole stay.</p>
       : results.map(person => <section key={person.traveller_id} className={`result result-${person.status.toLowerCase()}`}>
         <h4>{person.display_name}</h4><strong>{statusText[person.status] || person.status}</strong>
+        <p>{person.schengen_days} Schengen days in this trip</p>
         {person.first_breach_date && <p>First breach: <b>{person.first_breach_date}</b>. Peak excess: {person.excess_days} day(s).</p>}
         {!['UNKNOWN', 'NOT_ASSESSED', 'NOT_APPLICABLE'].includes(person.status) && <>
           <dl className="result-metrics"><div><dt>Peak usage including affected later travel</dt><dd>{person.peak_rolling_days} / 90</dd></div>
@@ -109,12 +115,14 @@ function TripEditor({ editor, setEditor, travellers, countries, referenceDate, i
   editor: Editor; setEditor: (editor: Editor | null) => void; travellers: Traveller[]; countries: Country[];
   referenceDate: string; includedPlans: string[]; csrf: string; onSaved: (saved: Trip) => void; onExpired: () => void;
 }) {
+  const errorId = useId();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [results, setResults] = useState<Assessment[] | null>(null);
   const [assessing, setAssessing] = useState(false);
+  const [historyPreview, setHistoryPreview] = useState<{ traveller_id: string; schengen_days: number }[] | null>(null);
   const [assessmentError, setAssessmentError] = useState('');
-  const container = useRef<HTMLDivElement>(null);
+  const container = useRef<HTMLDialogElement>(null);
   const { draft } = editor;
   const planned = draft.status === 'PLANNED';
   const itinerary = editor.itinerary || copyItinerary(draft.participants[0] || blankParticipant('', referenceDate));
@@ -126,15 +134,19 @@ function TripEditor({ editor, setEditor, travellers, countries, referenceDate, i
     setEditor({ ...editor, itinerary: copyItinerary(value), draft: { ...draft, participants: participantsFor(value) } });
   }
   function changeDraft(value: Partial<TripDraft>) { setError(''); setEditor({ ...editor, draft: { ...draft, ...value } }); }
-  useEffect(() => { container.current?.scrollIntoView({ block: 'start', behavior: 'instant' }); }, []);
+  useEffect(() => { const element = container.current; element?.showModal(); return () => element?.close(); }, []);
   useEffect(() => {
-    setResults(null); setAssessmentError(''); setAssessing(false);
-    if (!planned || editor.requiresSharedReview || !draft.participants.length || draft.participants.some(p =>
+    setResults(null); setHistoryPreview(null); setAssessmentError(''); setAssessing(false);
+    if (editor.requiresSharedReview || !draft.participants.length || draft.participants.some(p =>
       !p.entry_date || !p.exit_date || p.segments.some(s => !countries.some(c => c.code === s.country_code) || !s.start_date || !s.end_date))) return;
     let active = true;
     const controller = new AbortController();
     const timer = setTimeout(() => {
       setAssessing(true);
+      if (!planned) {
+        api<{ participants: { traveller_id: string; schengen_days: number }[] }>('/trips/preview', { method: 'POST', signal: controller.signal, body: JSON.stringify({ candidate: { ...draft, title: draft.title || 'History preview' }, exclude_trip_id: editor.id || null }) }, csrf).then(data => { if (active) setHistoryPreview(data.participants); }).catch(error => { if (active) setAssessmentError(message(error)); }).finally(() => { if (active) setAssessing(false); });
+        return;
+      }
       api<{ travellers: Assessment[] }>('/eligibility/evaluate', { method: 'POST', signal: controller.signal,
         body: JSON.stringify({ candidate: { ...draft, title: draft.title.trim() || 'Unsaved scenario' },
           included_plan_ids: includedPlans, exclude_trip_id: editor.id || null }),
@@ -161,12 +173,14 @@ function TripEditor({ editor, setEditor, travellers, countries, referenceDate, i
       setError(message(error));
     } finally { setSaving(false); }
   }
-  return <div ref={container} className={`trip-editor card ${planned ? 'planner-editor' : ''}`}>
+  return <dialog ref={container} aria-label="Trip editor" onCancel={event => { event.preventDefault(); if (!saving) setEditor(null); }} className={`trip-editor card ${planned ? 'planner-editor' : ''}`}>
+    <div className="sheet-heading"><span className="eyebrow">YOUR JOURNEY, STEP BY STEP</span><button type="button" className="secondary icon-button" aria-label="Close trip editor" disabled={saving} onClick={() => setEditor(null)}><Icon name="close" /></button></div>
     <h3>{editor.confirming ? 'Review actual travel dates' : editor.id ? 'Edit trip' : planned ? 'Build a travel scenario' : 'Record a trip'}</h3>
+    {editor.resizeReview && <p className="notice">{editor.resizeReview} Review the adjusted dates and country segments below before saving.</p>}
     {editor.confirming && <p>Review the actual dates and destinations, then select who travelled before confirming this plan as history.</p>}
-    <div className={planned ? 'planner-grid' : ''}><form onSubmit={save}>
+    <div className={planned ? 'planner-grid' : ''}><form onSubmit={save} aria-describedby={error ? errorId : undefined}>
       <label>Trip name<input value={draft.title} required maxLength={150} onChange={e => changeDraft({ title: e.target.value })} placeholder="e.g. Spring in France" /></label>
-      <fieldset className="traveller-selection"><legend>Who is travelling?</legend>{travellers.map(person => <label key={person.id}>
+      <fieldset className="traveller-selection"><legend>1 · Who is travelling?</legend>{travellers.map(person => <label key={person.id}>
         <input type="checkbox" checked={draft.participants.some(p => p.traveller_id === person.id)} onChange={e => {
           const ids = draft.participants.map(p => p.traveller_id);
           changeDraft({ participants: participantsFor(itinerary, e.target.checked ? [...ids, person.id] : ids.filter(id => id !== person.id)) });
@@ -188,36 +202,44 @@ function TripEditor({ editor, setEditor, travellers, countries, referenceDate, i
       </div>}
       <ItineraryEditor participant={itinerary} countries={countries} onChange={changeItinerary} />
       <p className="field-note">Dates are inclusive. Cover every itinerary day, including non-Schengen destinations. A border-crossing day can appear in both adjoining countries.</p>
-      {error && <p role="alert" className="error">{error}</p>}
-      <div className="actions"><button disabled={saving || !!editor.requiresSharedReview}>{saving ? 'Saving…' : editor.confirming ? 'Confirm actual travel'
+      {error && <p id={errorId} role="alert" className="error">{error}</p>}
+      {!planned && <aside className="history-preview" aria-label="History day count" aria-live="polite"><h4>4 · Review counted days</h4>{assessing ? <p>Counting travel days…</p> : assessmentError ? <p className="error" role="alert">{assessmentError}</p> : historyPreview ? historyPreview.map(p => <p key={p.traveller_id}>{travellers.find(t => t.id === p.traveller_id)?.display_name}: <strong>{p.schengen_days} Schengen days</strong></p>) : <p>Choose travellers, dates and countries to preview the count.</p>}</aside>}
+      <p className="field-note">5 · Save after reviewing dates, destinations and each traveller’s assessment. {planned ? 'New plans are excluded from your scenario by default.' : 'Saving confirms this travel and clears the affected history reviews.'}</p><div className="actions editor-actions"><button disabled={saving || !!editor.requiresSharedReview}>{saving ? 'Saving…' : editor.confirming ? 'Confirm actual travel'
         : planned ? 'Save plan' : editor.id ? 'Save changes' : 'Save history'}</button>
         <button type="button" className="secondary" disabled={saving} onClick={() => setEditor(null)}>Cancel</button></div>
     </form>{planned && <Results results={results} loading={assessing} error={assessmentError} />}</div>
-  </div>;
+  </dialog>;
 }
 
-function TripRow({ trip, travellers, shownParticipants, onEdit, onDelete, onDuplicate, onConfirm, included, onInclude }: {
-  trip: Trip; travellers: Traveller[]; shownParticipants?: Trip['participants']; onEdit: () => void;
+function TripRow({ trip, travellers, shownParticipants, onEdit, onDelete, onDuplicate, onConfirm, included, onInclude, onDetail, hasProofs }: {
+  onDetail?: () => void; trip: Trip; travellers: Traveller[]; shownParticipants?: Trip['participants']; onEdit: () => void;
   onDelete: () => void; onDuplicate?: () => void; onConfirm?: () => void; included?: boolean; onInclude?: (value: boolean) => void;
+  hasProofs?: boolean;
 }) {
-  return <li className="trip-row"><div className="trip-row-heading"><h4>{trip.title}</h4>
+  const people = shownParticipants || trip.participants;
+  const shared = new Set(people.map(itineraryKey)).size === 1;
+  const groups = shared ? [people[0]] : people;
+  return <article className="trip-row"><div className="trip-row-heading"><button className="trip-title" onClick={onDetail || onEdit}><span className="trip-icon"><Icon name={trip.status === 'HISTORY' ? 'history' : 'planner'} /></span><h4>{trip.title}</h4></button>
     <span className={`trip-kind ${trip.status.toLowerCase()}`}>{trip.status === 'HISTORY' ? 'Confirmed history' : 'Provisional plan'}</span></div>
-    {(shownParticipants || trip.participants).map(person => <div className="trip-person" key={person.traveller_id}>
-      <strong>{travellers.find(t => t.id === person.traveller_id)?.display_name}</strong>
-      <span>{person.entry_date} → {person.exit_date}</span><b>{person.schengen_days} Schengen day{person.schengen_days === 1 ? '' : 's'}</b>
+    <div className="avatar-chips">{trip.participants.map(p => <span key={p.traveller_id}><span className="avatar small" aria-hidden="true">{travellers.find(t => t.id === p.traveller_id)?.display_name[0]}</span>{travellers.find(t => t.id === p.traveller_id)?.display_name}</span>)}</div>
+    {groups.map(person => <div className="trip-person" key={person.traveller_id}>
+      {!shared && <strong>{travellers.find(t => t.id === person.traveller_id)?.display_name}</strong>}
+      <span>{formatDate(person.entry_date)} → {formatDate(person.exit_date)}</span><b>{person.schengen_days} Schengen day{person.schengen_days === 1 ? '' : 's'}</b>
       <div className="trip-destinations">{person.segments.map((segment, i) => <span key={i}>
-        {segment.country_name || segment.country_code} · {segment.start_date} – {segment.end_date}</span>)}</div>
+        {segment.country_name || segment.country_code}{person.segments.length > 1 && ` · ${formatDate(segment.start_date)} – ${formatDate(segment.end_date)}`}</span>)}</div>
     </div>)}
     <div className="trip-row-footer"><div className="actions"><button type="button" className="text-button" onClick={onEdit} aria-label={`Edit ${trip.title}`}>Edit</button>
+      {trip.status === 'HISTORY' && onDetail && <button type="button" className="text-button" onClick={onDetail} aria-label={`Proof documents for ${trip.title}`} title={hasProofs ? 'Proof uploaded' : undefined}>Proof documents {hasProofs && <span className="proof-uploaded-tick" role="img" aria-label="Proof uploaded">✓</span>}</button>}
       {onDuplicate && <button type="button" className="text-button" onClick={onDuplicate} aria-label={`Duplicate ${trip.title}`}>Duplicate</button>}
       {onConfirm && <button type="button" className="text-button" onClick={onConfirm} aria-label={`Confirm ${trip.title} as history`}>Confirm as history</button>}
       <button type="button" className="text-button danger" onClick={onDelete} aria-label={`Delete ${trip.title}`}>Delete</button></div>
-      {onInclude && <label className="include-plan"><input type="checkbox" checked={included} onChange={e => onInclude(e.target.checked)} />
-        Include in scenario</label>}</div>
-  </li>;
+      {onInclude && <label className="include-plan"><input type="checkbox" checked={included} onChange={e => onInclude(e.target.checked)} />Include in scenario</label>}</div>
+  </article>;
+
 }
 
-export function TravelWorkspace({ travellers, csrf, referenceDate, revision, onChanged, onExpired }: {
+export function TravelWorkspace({ travellers, csrf, referenceDate, revision, onChanged, onExpired, screen, onNavigate, selectedTraveller, onSelectTraveller, plannerView, onPlannerView, summary }: {
+  screen: Screen; onNavigate: (screen: Screen) => void; selectedTraveller: string; onSelectTraveller: (id: string) => void; plannerView: PlannerView; onPlannerView: (view: PlannerView) => void; summary: Summary | null;
   travellers: Traveller[]; csrf: string; referenceDate: string; revision: number;
   onChanged: (historyTravellerIds?: string[]) => void; onExpired: () => void;
 }) {
@@ -230,7 +252,11 @@ export function TravelWorkspace({ travellers, csrf, referenceDate, revision, onC
       return Array.isArray(saved) ? saved.filter((id): id is string => typeof id === 'string').slice(0, 100) : [];
     } catch { return []; }
   });
-  const [travellerFilter, setTravellerFilter] = useState('');
+  const travellerFilter = selectedTraveller;
+  const setTravellerFilter = onSelectTraveller;
+  const [assessments, setAssessments] = useState<Record<string, Assessment[] | string>>({});
+  const [detailTrip, setDetailTrip] = useState<Trip | null>(null);
+  const [proofCounts, setProofCounts] = useState<Record<string, number>>({});
   const [countryFilter, setCountryFilter] = useState('');
   const [yearFilter, setYearFilter] = useState('');
   const [startFilter, setStartFilter] = useState('');
@@ -254,9 +280,34 @@ export function TravelWorkspace({ travellers, csrf, referenceDate, revision, onC
     return () => { active = false; };
   }, [revision, refresh]);
   useEffect(() => {
+    if (screen !== 'history' || loading) return;
+    const controller = new AbortController();
+    setProofCounts({});
+    trips.filter(trip => trip.status === 'HISTORY').forEach(trip => {
+      api<unknown[]>(`/trips/${trip.id}/proofs`, { signal: controller.signal }).then(proofs => {
+        if (!controller.signal.aborted) setProofCounts(counts => trip.id in counts ? counts : { ...counts, [trip.id]: proofs.length });
+      }).catch(error => {
+        if (!controller.signal.aborted && error instanceof ApiError && error.status === 401) onExpired();
+      });
+    });
+    return () => controller.abort();
+  }, [trips, screen, loading]);
+  useEffect(() => {
     if (loading) return;
     try { localStorage.setItem('schengen-included-plans', JSON.stringify(includedPlans)); } catch { /* Storage may be disabled. */ }
   }, [includedPlans, loading]);
+  useEffect(() => {
+    if (loading || (screen !== 'home' && screen !== 'planner')) return;
+    const controller = new AbortController();
+    setAssessments({});
+    trips.filter(t => t.status === 'PLANNED').forEach(trip => {
+      api<{ travellers: Assessment[] }>('/eligibility/evaluate', { method: 'POST', signal: controller.signal,
+        body: JSON.stringify({ candidate: copyDraft(trip), included_plan_ids: includedPlans, exclude_trip_id: trip.id, search_days: 1 }),
+      }, csrf).then(result => { if (!controller.signal.aborted) setAssessments(old => ({ ...old, [trip.id]: result.travellers })); })
+        .catch(error => { if (!controller.signal.aborted) { if (error instanceof ApiError && error.status === 401) onExpired(); setAssessments(old => ({ ...old, [trip.id]: `Unassessed: ${message(error)}` })); } });
+    });
+    return () => controller.abort();
+  }, [trips, includedPlans, loading, revision, csrf, screen]);
   function open(nextEditor: Editor) {
     if (editor && !window.confirm('Replace the open editor? Unsaved changes in that editor will be discarded.')) return;
     const originalParticipants = nextEditor.draft.participants;
@@ -268,7 +319,7 @@ export function TravelWorkspace({ travellers, csrf, referenceDate, revision, onC
     });
   }
   function add(status: TripDraft['status']) {
-    open({ draft: { title: '', status, participants: travellers[0] ? [blankParticipant(travellers[0].id, referenceDate)] : [] } });
+    open({ draft: { title: '', status, participants: travellers.filter(p => !selectedTraveller || p.id === selectedTraveller).map(p => blankParticipant(p.id, referenceDate)) } });
   }
   async function remove(trip: Trip) {
     if (!window.confirm(`Delete “${trip.title}” for all its travellers? This removes the saved trip. An audit record is retained.`)) return;
@@ -285,7 +336,7 @@ export function TravelWorkspace({ travellers, csrf, referenceDate, revision, onC
     }
   }
   const history = trips.filter(t => t.status === 'HISTORY');
-  const plans = trips.filter(t => t.status === 'PLANNED');
+  const plans = trips.filter(t => t.status === 'PLANNED' && (!selectedTraveller || t.participants.some(p => p.traveller_id === selectedTraveller))).sort((a,b) => a.participants[0].entry_date.localeCompare(b.participants[0].entry_date));
   const years = [...new Set(history.flatMap(t => t.participants.flatMap(p => {
     const result = []; for (let year = Number(p.entry_date.slice(0, 4)); year <= Number(p.exit_date.slice(0, 4)); year++) result.push(String(year));
     return result;
@@ -310,7 +361,7 @@ export function TravelWorkspace({ travellers, csrf, referenceDate, revision, onC
       setFeedback(saved.status === 'HISTORY' ? 'History saved. Please review completeness for the affected travellers.' : 'Provisional plan saved.');
       onChanged(affected);
     }, onExpired };
-  async function resizeTrip(trip: Trip, travellerId: string, edge: 'start' | 'end', date: string) {
+  function resizedTrip(trip: Trip, travellerId: string, edge: 'start' | 'end', date: string): TripDraft {
     const source = trip.participants.find(p => p.traveller_id === travellerId);
     if (!source) throw new Error('Traveller is no longer on this trip. Reload travel data.');
     const participants = copyDraft(trip).participants.map(person => {
@@ -327,19 +378,37 @@ export function TravelWorkspace({ travellers, csrf, referenceDate, revision, onC
       if (end > person.exit_date) segments[segments.length - 1].end_date = end;
       return { ...person, entry_date: start, exit_date: end, segments };
     });
-    const saved = await api<Trip>(`/trips/${trip.id}`, {
-      method: 'PATCH', body: JSON.stringify({ title: trip.title, status: trip.status, participants, version: trip.version }),
-    }, csrf);
-    editorProps.onSaved(saved);
+    return { title: trip.title, status: trip.status, participants };
+  }
+  async function previewResize(trip: Trip, travellerId: string, edge: 'start' | 'end', date: string) {
+    if (trip.status === 'HISTORY') return 'History change · Review before saving';
+    try {
+      const result = await api<{ travellers: Assessment[] }>('/eligibility/evaluate', { method: 'POST', body: JSON.stringify({ candidate: resizedTrip(trip, travellerId, edge, date), included_plan_ids: includedPlans, exclude_trip_id: trip.id, search_days: 1 }) }, csrf);
+      return result.travellers.map(p => `${p.display_name}: ${p.status === 'OVER_LIMIT' ? `Over limit from ${formatDate(p.first_breach_date!)}` : p.status === 'PERMITTED' ? 'Eligible' : p.status === 'APPROACHING_LIMIT' ? 'Within allowance · Near limit' : 'Unassessed'}`).join(' · ');
+    } catch (error) { return `Unassessed: ${message(error)}`; }
+  }
+  async function resizeTrip(trip: Trip, travellerId: string, edge: 'start' | 'end', date: string) {
+    const draft = resizedTrip(trip, travellerId, edge, date);
+    const changed = draft.participants.filter((p,i) => itineraryKey(p) !== itineraryKey(trip.participants[i]));
+    open({ draft, id: trip.id, version: trip.version,
+      resizeReview: `Timeline change affects ${changed.map(p => travellers.find(t => t.id === p.traveller_id)?.display_name).join(' and ')}.` });
   }
   return <div className="travel-workspace"><datalist id="country-options">{countries.map(country => <option key={country.code} value={country.name}>{country.code}</option>)}</datalist>
     {error && <div role="alert" className="notice"><p className="error">{error}</p><button onClick={() => setRefresh(refresh + 1)}>Reload travel data</button></div>}
+    {loading && <div className="loading-skeleton" role="status" aria-label="Loading travel"><span /><span /></div>}
+    {error && trips.length > 0 && <p className="notice">Previously loaded records are shown below. Refresh before relying on them.</p>}
     {feedback && <p role="status" className="success-message">{feedback}</p>}
-    <section aria-labelledby="history-heading" className="workspace-section">
+    {screen === 'home' && !loading && !error && <HomeScreen travellers={travellers} selected={selectedTraveller} summary={summary} trips={trips} includedPlans={includedPlans} assessments={assessments}
+      onManage={() => onNavigate('more')} onPlan={() => { onNavigate('planner'); add('PLANNED'); }} onTrip={setDetailTrip} onPlanner={() => { onNavigate('planner'); onPlannerView('trips'); }} />}
+    {editor && <TripEditor key={`${editor.id || 'new'}-${editor.confirming || false}`} editor={editor} {...editorProps} />}
+    {detailTrip && <Sheet title={detailTrip.title} onClose={() => setDetailTrip(null)}><p className="trip-kind">{detailTrip.status === 'HISTORY' ? 'Confirmed history' : 'Provisional plan'}</p>
+      {detailTrip.status === 'HISTORY' && <ProofDocuments key={detailTrip.id} tripId={detailTrip.id} csrf={csrf} onExpired={onExpired} onCountChanged={count => setProofCounts(counts => ({ ...counts, [detailTrip.id]: count }))} />}
+      {detailTrip.participants.map(p => <div className="detail-itinerary" key={p.traveller_id}><h4>{travellers.find(t => t.id === p.traveller_id)?.display_name}</h4><p>{formatDate(p.entry_date)} – {formatDate(p.exit_date)} · {p.schengen_days} Schengen days</p>{p.segments.map((segment,i) => <p key={i}>{segment.country_name || segment.country_code} · {formatDate(segment.start_date)} – {formatDate(segment.end_date)}</p>)}</div>)}
+      <div className="actions"><button onClick={() => { open({ draft: copyDraft(detailTrip), id: detailTrip.id, version: detailTrip.version }); setDetailTrip(null); }}>Edit trip</button>{detailTrip.status === 'PLANNED' && <><button className="secondary" onClick={() => { open({ draft: { ...copyDraft(detailTrip), title: `${detailTrip.title} (copy)` } }); setDetailTrip(null); }}>Duplicate</button><button className="secondary" onClick={() => { open({ draft: { ...copyDraft(detailTrip), status: 'HISTORY' }, id: detailTrip.id, version: detailTrip.version, confirming: true }); setDetailTrip(null); }}>Confirm as history</button><label className="include-plan"><input type="checkbox" checked={includedPlans.includes(detailTrip.id)} onChange={e => setIncludedPlans(ids => e.target.checked ? [...ids,detailTrip.id] : ids.filter(id => id !== detailTrip.id))} />Include in scenario</label></>}<button className="text-button danger" onClick={() => { void remove(detailTrip); setDetailTrip(null); }}>Delete trip</button><button className="secondary" onClick={() => { onNavigate('planner'); onPlannerView('trips'); setDetailTrip(null); }}>View in planner</button></div></Sheet>}
+    {screen === 'history' && <section aria-labelledby="history-heading" className="workspace-section">
       <div className="section-heading"><div><span className="eyebrow">YOUR RECORDED JOURNEYS</span><h2 id="history-heading">Travel History</h2></div>
         <button onClick={() => add('HISTORY')} disabled={!countries.length || !!editor}>Add history</button></div>
       <p className="intro">Confirmed travel, kept separately for each person. Both entry and exit dates count.</p>
-      {editor?.draft.status === 'HISTORY' && <TripEditor key={`${editor.id || 'new'}-${editor.confirming || false}`} editor={editor} {...editorProps} />}
       <div className="history-filters"><label>Filter by traveller<select value={travellerFilter} onChange={e => setTravellerFilter(e.target.value)}>
         <option value="">Both travellers</option>{travellers.map(t => <option key={t.id} value={t.id}>{t.display_name}</option>)}</select></label>
         <label>Filter by country<select value={countryFilter} onChange={e => setCountryFilter(e.target.value)}><option value="">All countries</option>
@@ -351,30 +420,32 @@ export function TravelWorkspace({ travellers, csrf, referenceDate, revision, onC
       {startFilter && endFilter && startFilter > endFilter && <p className="error" role="alert">Filter start must be on or before the end date.</p>}
       {loading && <p role="status">Loading recorded journeys…</p>}
       {!loading && !visibleHistory.length && <div className="empty-state">{history.length ? 'No trips match these filters.' : 'No travel history yet. Record past trips, or confirm a complete history with no travel.'}</div>}
-      <ul className="trip-list">{visibleHistory.map(trip => <TripRow key={trip.id} trip={trip} travellers={travellers} shownParticipants={matching(trip)}
-        onEdit={() => open({ draft: copyDraft(trip), id: trip.id, version: trip.version })} onDelete={() => remove(trip)} />)}</ul>
-    </section>
-    <section aria-labelledby="planner-heading" className="workspace-section">
+      <ul className="trip-list">{visibleHistory.map(trip => <li key={trip.id}><TripRow onDetail={() => setDetailTrip(trip)} trip={trip} travellers={travellers} shownParticipants={matching(trip)} hasProofs={proofCounts[trip.id] > 0}
+        onEdit={() => open({ draft: copyDraft(trip), id: trip.id, version: trip.version })} onDelete={() => remove(trip)} /></li>)}</ul>
+    </section>}
+    {screen === 'planner' && <section aria-labelledby="planner-heading" className={`workspace-section planner-${plannerView}`}>
       <div className="section-heading"><div><span className="eyebrow">LOOK AHEAD, DAY BY DAY</span><h2 id="planner-heading">Plan Future Travel</h2></div>
         <button onClick={() => add('PLANNED')} disabled={!countries.length || !!editor}>Plan a trip</button></div>
       <p className="intro">Enter one itinerary and select who is travelling. Each traveller’s allowance is assessed separately before saving.</p>
-      {editor?.draft.status === 'PLANNED' && <TripEditor key={editor.id || 'new-plan'} editor={editor} {...editorProps} />}
-      <h3>Saved plans &amp; scenario baseline</h3><p className="field-note">“Include in scenario” controls which planned trips appear on the calendar and count towards allowance calculations. New plans start excluded. Your included plans are remembered in this browser. Include only the plans you want to combine with your current scenario. Alternative plans may overlap until selected together.</p>
+      <div className="planner-tabs" role="group" aria-label="Planner view">{(['trips','calendar','timeline'] as const).map(view => <button key={view} aria-pressed={view === plannerView} onClick={() => onPlannerView(view)}>{view[0].toUpperCase() + view.slice(1)}</button>)}</div>
+      <details className="scenario-options"><summary>{includedPlans.length} plans included · Manage scenario</summary><p>Saved per browser. New plans start excluded.</p>{trips.filter(t => t.status === 'PLANNED').map(trip => <label key={trip.id} className="include-plan"><input type="checkbox" checked={includedPlans.includes(trip.id)} onChange={e => setIncludedPlans(ids => e.target.checked ? [...ids, trip.id] : ids.filter(id => id !== trip.id))} />{trip.title}</label>)}</details>
+      {plannerView === 'trips' && <><h3>Saved plans &amp; scenario baseline</h3><p className="field-note">Plans stay provisional. Include the journeys you want to assess together; new plans start excluded.</p>
       {!loading && !plans.length && <div className="empty-state">No saved plans. Build a scenario to see when and how long you could travel.</div>}
-      <ul className="trip-list">{plans.map(trip => <TripRow key={trip.id} trip={trip} travellers={travellers}
+      <ul className="trip-list">{plans.map(trip => <li className="plan-card-group" key={trip.id}><TripRow onDetail={() => setDetailTrip(trip)} key={trip.id} trip={trip} travellers={travellers}
         onEdit={() => open({ draft: copyDraft(trip), id: trip.id, version: trip.version })} onDelete={() => remove(trip)}
         onDuplicate={() => open({ draft: { ...copyDraft(trip), title: `${trip.title.slice(0, 140)} (copy)` } })}
         onConfirm={() => open({ draft: { ...copyDraft(trip), status: 'HISTORY' }, id: trip.id, version: trip.version, confirming: true })}
         included={includedPlans.includes(trip.id)} onInclude={value => {
           setIncludedPlans(ids => value ? [...ids, trip.id] : ids.filter(id => id !== trip.id));
-        }} />)}</ul>
-    </section>
-    <TravelCalendar trips={trips} resizeDisabled={!!editor} onResize={resizeTrip} travellers={travellers} includedPlans={includedPlans} revision={`${revision}-${refresh}`}
+        }} />{Array.isArray(assessments[trip.id]) ? <div className="plan-assessments">{(assessments[trip.id] as Assessment[]).map(p => <span className={`eligibility ${p.status.toLowerCase()}`} key={p.traveller_id}>{p.display_name} · {p.status === 'PERMITTED' ? 'Eligible' : p.status === 'APPROACHING_LIMIT' ? 'Eligible · Near limit' : p.status === 'OVER_LIMIT' ? `Over limit · ${formatDate(p.first_breach_date!)}` : 'Unassessed'}</span>)}</div> : <p className="field-note">{typeof assessments[trip.id] === 'string' ? String(assessments[trip.id]) : 'Checking eligibility…'}</p>}</li>)}</ul></>}
+    </section>}
+    {screen === 'planner' && plannerView !== 'trips' && <TravelCalendar onModeChange={view => onPlannerView(view === 'gantt' ? 'timeline' : 'calendar')} onPreviewResize={previewResize} onEditTrip={trip => open({ draft: copyDraft(trip), id: trip.id, version: trip.version })} plannerView={plannerView} selectedTraveller={selectedTraveller} trips={trips} resizeDisabled={!!editor} onResize={resizeTrip} travellers={travellers} includedPlans={includedPlans} revision={`${revision}-${refresh}`}
       onExpired={onExpired} onPlan={(start, end, ids) => open({ draft: {
         title: '', status: 'PLANNED', participants: ids.map(id => ({
           traveller_id: id, entry_date: start, exit_date: end,
           segments: [{ country_code: '', start_date: start, end_date: end }],
         })),
-      } })} />
+      } })} />}
+    {(screen === 'home' || screen === 'planner') && !editor && <button className="quick-plan" onClick={() => { onNavigate('planner'); add('PLANNED'); }}><Icon name="plus" />Plan trip</button>}
   </div>;
 }

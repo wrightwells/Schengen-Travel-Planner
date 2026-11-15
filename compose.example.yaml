@@ -1,9 +1,9 @@
-# Example deployment using the containers built for GitHub release v1.0.0.
+# Example deployment using the containers built for GitHub release v1.1.0.
 # Copy .env.example to .env and set DB_PASSWORD before starting.
 name: schengen-planner-example
 services:
   web:
-    image: ghcr.io/wrightwells/schengen-travel-planner-web:v1.0.0
+    image: ghcr.io/wrightwells/schengen-travel-planner-web:v1.1.0
     ports:
       - "127.0.0.1:9067:8080"
     networks: [frontend, backend]
@@ -11,10 +11,11 @@ services:
     restart: unless-stopped
 
   migrate:
-    image: ghcr.io/wrightwells/schengen-travel-planner-api:v1.0.0
+    image: ghcr.io/wrightwells/schengen-travel-planner-api:v1.1.0
     command: ["/app/.venv/bin/alembic", "upgrade", "head"]
     environment: &local-api-environment
       DATABASE_URL: postgresql+psycopg://planner:${DB_PASSWORD:?Set DB_PASSWORD in .env}@db:5432/planner
+      PROOF_STORAGE_PATH: /app/proofs
       ALLOWED_HOSTS: localhost,127.0.0.1,${PLANNER_TAILSCALE_HOST:-localhost}
       COOKIE_SECURE: ${PLANNER_COOKIE_SECURE:-false}
     networks: [backend]
@@ -23,8 +24,14 @@ services:
         condition: service_healthy
 
   api:
-    image: ghcr.io/wrightwells/schengen-travel-planner-api:v1.0.0
+    image: ghcr.io/wrightwells/schengen-travel-planner-api:v1.1.0
     environment: *local-api-environment
+    volumes:
+      # Optional host folder: add -f compose.proofs-host.yaml (see README).
+      - proofdata:/app/proofs
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     networks: [backend]
     depends_on:
       migrate:
@@ -52,4 +59,5 @@ networks:
   backend:
     internal: true
 volumes:
+  proofdata:
   pgdata:

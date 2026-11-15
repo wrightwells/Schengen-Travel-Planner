@@ -90,7 +90,12 @@ jobs:
           tar -czf "schengen-web-$RELEASE_TAG.tar.gz" -C web/dist .
           title="version ${RELEASE_TAG#v} web"
           if [ "$RELEASE_TAG" = v1.0.0 ]; then title="version 1 web"; fi
+          if [ "$RELEASE_TAG" = v1.1.0 ]; then title="produstion v1.1"; fi
+          notes=()
+          if [ -f "docs/releases/$RELEASE_TAG.md" ]; then
+            notes=(--notes-file "docs/releases/$RELEASE_TAG.md")
+          fi
           gh release create "$RELEASE_TAG" \
-            --verify-tag --title "$title" --generate-notes \
-            compose.yaml compose.example.yaml .env.example tailscale/serve.json \
+            --verify-tag --title "$title" --generate-notes "${notes[@]}" \
+            compose.yaml compose.example.yaml compose.proofs-host.yaml .env.example tailscale/serve.json \
             "schengen-web-$RELEASE_TAG.tar.gz"

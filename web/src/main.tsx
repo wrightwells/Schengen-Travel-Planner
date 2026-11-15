@@ -7,6 +7,8 @@ import type { Traveller, PersonSummary, Summary } from './api';
 import { TravelWorkspace } from './TravelWorkspace';
 import { ExportPanel } from './ExportPanel';
 import { ImportPanel } from './ImportPanel';
+import { Icon, Navigation, formatDate } from './Design';
+import type { Screen, PlannerView } from './Design';
 import './style.css';
 
 type Session = { username: string; csrf_token: string };
@@ -76,7 +78,7 @@ function Profile({ traveller, csrf, onSave, onExpired, summary, referenceDate }:
           ? 'Not assessed — check immigration status' : 'Rule applicability unconfirmed'}</span></div></div>
     <div className="allowance-summary"><div><span>Recorded Schengen days</span><strong>{summary?.used_days ?? '—'}<small> / 90</small></strong></div>
       <div><span>Remaining days</span><strong>{traveller.history_complete && traveller.rule_applicable === true ? summary?.remaining_days ?? '—' : '—'}</strong></div></div>
-    <p className="field-note">As of {referenceDate} · confirmed history only</p>
+    <p className="field-note">As of {formatDate(referenceDate)} · confirmed history only</p>
     <p className={`notice ${summary?.status === 'OVER_LIMIT' ? 'over-limit-notice' : ''}`}>{traveller.rule_applicable === false
       ? 'Not assessed — check immigration status' : summary?.status === 'OVER_LIMIT'
       ? 'Over limit in this rolling window' : summary?.status === 'APPROACHING_LIMIT' ? 'Approaching the rolling limit'
@@ -103,11 +105,22 @@ function Household({ session, onExpired }: { session: Session; onExpired: () => 
   const [reload, setReload] = useState(0);
   const referenceDate = useLocalDate();
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [screen, setScreen] = useState<Screen>(() => {
+    try { const saved = sessionStorage.getItem('schengen-screen'); return saved === 'history' || saved === 'planner' || saved === 'more' ? saved : 'home'; } catch { return 'home'; }
+  });
+  useEffect(() => { try { sessionStorage.setItem('schengen-screen', screen); } catch { /* Optional storage. */ } window.scrollTo({ top: 0, behavior: 'instant' }); }, [screen]);
+  const [selected, setSelected] = useState(() => { try { return localStorage.getItem('schengen-selected-traveller') ?? '__initial__'; } catch { return '__initial__'; } });
+  const [view, setView] = useState<PlannerView>(() => {
+    try { const saved = localStorage.getItem('schengen-planner-view'); return saved === 'calendar' || saved === 'timeline' ? saved : 'trips'; } catch { return 'trips'; }
+  });
+  useEffect(() => { try { localStorage.setItem('schengen-selected-traveller', selected); } catch { /* Optional storage. */ } }, [selected]);
+  useEffect(() => { try { localStorage.setItem('schengen-planner-view', view); } catch { /* Optional storage. */ } }, [view]);
+
   useEffect(() => {
     let active = true;
     setLoading(true); setError('');
     Promise.all([api<Traveller[]>('/travellers'), api<Summary>(`/eligibility/summary?reference_date=${referenceDate}`)])
-      .then(([data, totals]) => { if (active) { setTravellers(data); setSummary(totals); } })
+      .then(([data, totals]) => { if (active) { setTravellers(data); setSummary(totals); setSelected(id => id === '__initial__' ? data[0]?.id || '' : data.some(p => p.id === id) ? id : ''); } })
       .catch(error => {
         if (!active) return;
         if (error instanceof ApiError && error.status === 401) onExpired();
@@ -119,30 +132,38 @@ function Household({ session, onExpired }: { session: Session; onExpired: () => 
     try { await api('/auth/logout', { method: 'POST' }, session.csrf_token); onExpired(); }
     catch (error) { setError(errorText(error)); }
   }
-  return <>
-    <div className="section-heading"><div><span className="eyebrow">HOUSEHOLD PROFILES</span>
-      <h2>Two travellers. Individual allowances.</h2></div><div className="actions"><a className="text-button" href="#exports-heading">Export travel</a><a className="text-button" href="#imports-heading">Import history</a><button className="secondary" onClick={logout}>Sign out</button></div></div>
-    <p className="intro">Your travel records and rolling allowances stay separate, even when you travel together.</p>
-    <p className="field-note">Allowances use today’s date and confirmed history. Saved plans are assessed in the calendar and planner.</p>
-    {error && <div role="alert"><p className="error">{error}</p><button onClick={() => setReload(reload + 1)}>Retry</button></div>}
-    {loading && <p role="status">Loading your household…</p>}
-    <div className="profiles">{travellers.map(traveller => <Profile key={traveller.id} traveller={traveller}
-      csrf={session.csrf_token} onExpired={onExpired} referenceDate={summary?.reference_date || referenceDate}
-      summary={summary?.travellers.find(person => person.traveller_id === traveller.id)}
-      onSave={saved => { setTravellers(items => items.map(item => item.id === saved.id ? saved : item)); setReload(value => value + 1); }} />)}</div>
-    <TravelWorkspace travellers={travellers} csrf={session.csrf_token} referenceDate={referenceDate}
-      revision={reload} onChanged={affected => {
-        if (affected?.length) {
-          setTravellers(items => items.map(item => affected.includes(item.id)
-            ? { ...item, history_complete: false, history_reviewed_on: null, version: item.version + 1 } : item));
-          setSummary(null);
-        }
-        setReload(value => value + 1);
-      }} onExpired={onExpired} />
-    <ExportPanel travellers={travellers} revision={reload} onExpired={onExpired} />
-    <ImportPanel travellers={travellers} csrf={session.csrf_token} revision={reload}
-      onChanged={() => setReload(value => value + 1)} onExpired={onExpired} />
-  </>;
+  return <div className="application">
+    <Navigation screen={screen} onNavigate={setScreen} view={view} onView={next => { setScreen('planner'); setView(next); }} />
+    <div className="screen-container">
+      <div className="workspace-topline"><span className="workspace-location">Your private travel space</span><button className="text-button" onClick={logout}>Sign out</button></div>
+      <div className="traveller-switch" role="group" aria-label="Selected traveller">{travellers.map(person => <button key={person.id} aria-pressed={selected === person.id} onClick={() => setSelected(person.id)}><span className="avatar small" aria-hidden="true">{person.display_name.slice(0,1)}</span>{person.display_name}</button>)}<button aria-pressed={!selected} onClick={() => setSelected('')}>Both</button></div>
+      {error && <div role="alert" className="notice"><p className="error">Calculation unavailable: {error}</p><button onClick={() => setReload(reload + 1)}>Retry</button></div>}
+      {loading && !travellers.length && <div className="loading-skeleton" role="status" aria-label="Loading your household"><span /><span /><span /></div>}
+      {travellers.length > 0 && !error && <>
+        <TravelWorkspace travellers={travellers} csrf={session.csrf_token} referenceDate={referenceDate}
+          screen={screen} onNavigate={setScreen} selectedTraveller={selected} onSelectTraveller={setSelected} plannerView={view} onPlannerView={setView} summary={summary}
+          revision={reload} onChanged={affected => {
+            if (affected?.length) {
+              setTravellers(items => items.map(item => affected.includes(item.id)
+                ? { ...item, history_complete: false, history_reviewed_on: null, version: item.version + 1 } : item));
+              setSummary(null);
+            }
+            setReload(value => value + 1);
+          }} onExpired={onExpired} />
+        {screen === 'more' && <section aria-labelledby="more-heading"><span className="eyebrow">MAKE THIS SPACE YOURS</span><h1 id="more-heading">Household &amp; settings</h1><p className="intro">Two travellers. Individual allowances.</p>
+          <h2>Traveller management</h2><div className="profiles">{travellers.map(traveller => <Profile key={traveller.id} traveller={traveller}
+            csrf={session.csrf_token} onExpired={onExpired} referenceDate={summary?.reference_date || referenceDate}
+            summary={summary?.travellers.find(person => person.traveller_id === traveller.id)}
+            onSave={saved => { setTravellers(items => items.map(item => item.id === saved.id ? saved : item)); setReload(value => value + 1); }} />)}</div>
+          <details className="data-management" open><summary><Icon name="history" />Data management<span>Import &amp; export</span></summary>
+            <ExportPanel travellers={travellers} revision={reload} onExpired={onExpired} />
+            <ImportPanel travellers={travellers} csrf={session.csrf_token} revision={reload} onChanged={() => setReload(value => value + 1)} onExpired={onExpired} />
+          </details><p className="field-note">Scenario selections are saved in this browser. They are not shared between devices.</p>
+        </section>}
+      </>}
+    </div>
+  </div>;
+
 }
 
 function App() {
@@ -159,13 +180,13 @@ function App() {
       }).finally(() => { if (active) setChecking(false); });
     return () => { active = false; };
   }, [reload]);
-  return <div className="shell"><header><a href="/" className="brand"><span aria-hidden="true" className="brand-mark">S</span>
-    <span>Schengen<span className="brand-subtitle">TRAVEL PLANNER</span></span></a><span className="private-label">Private household workspace</span></header>
+  return <div className={`shell ${session ? 'authenticated' : 'signed-out'}`}><header><a href="/" className="brand"><span aria-hidden="true" className="brand-mark">S</span>
+    <span>Schengen<span className="brand-subtitle">Travel Planner</span></span></a><span className="private-label">Private household workspace</span></header>
     <main>{checking ? <p role="status">Opening your planner…</p> : error ? <section className="card" role="alert">
       <h2>Cannot reach your planner</h2><p>{error}</p><button onClick={() => setReload(reload + 1)}>Retry connection</button>
-    </section> : session ? <Household session={session} onExpired={() => setSession(null)} /> : <Login onLogin={setSession} />}</main>
+    </section> : session ? <Household session={session} onExpired={() => setSession(null)} /> : <Login onLogin={value => { try { sessionStorage.removeItem('schengen-screen'); } catch { /* Optional storage. */ } setSession(value); }} />}</main>
     <footer><p>A planning aid for the standard 90 days in any rolling 180-day period.
-      Your immigration status may change which rules apply.</p><span>Development version 0.4.0 · catalogue 2026-10-28</span></footer></div>;
+      Your immigration status may change which rules apply.</p><span>Private by design · 90/180 planning</span></footer></div>;
 }
 
 createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>);

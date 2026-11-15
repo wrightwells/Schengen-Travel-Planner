@@ -1,0 +1,12 @@
+# Optional override for compose.yaml, compose.local.yaml or compose.example.yaml.
+# Prepare the host directory first (owner 10001:10001, mode 0700), then set an
+# absolute PROOF_HOST_PATH in the selected .env file. See docs/deployment.md.
+# Compose merges volumes by container target: this replaces only /app/proofs.
+services:
+  api:
+    volumes:
+      - type: bind
+        source: ${PROOF_HOST_PATH:?Set PROOF_HOST_PATH to a prepared absolute host directory}
+        target: /app/proofs
+        bind:
+          create_host_path: false

@@ -18,7 +18,7 @@ export type Trip = Omit<TripDraft, 'participants'> & { id: string; version: numb
 export type PersonSummary = { traveller_id: string; used_days: number; remaining_days: number;
   status: string; history_complete: boolean; history_reviewed_on: string | null };
 export type Summary = { reference_date: string; window_start: string; baseline: string; travellers: PersonSummary[] };
-export type Assessment = { traveller_id: string; display_name: string; status: string;
+export type Assessment = { schengen_days: number; traveller_id: string; display_name: string; status: string;
   first_breach_date: string | null; peak_rolling_days: number; remaining_at_entry: number;
   remaining_at_exit: number; maximum_contiguous_stay_days: number | null;
   earliest_one_day_entry: string | null; earliest_full_trip_entry: string | null;
@@ -33,7 +33,7 @@ export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
-export async function api<T>(path: string, options: RequestInit = {}, csrf?: string): Promise<T> {
+export async function apiResponse(path: string, options: RequestInit = {}, csrf?: string): Promise<Response> {
   const response = await fetch(`/api/v1${path}`, {
     ...options,
     credentials: 'same-origin',
@@ -50,5 +50,10 @@ export async function api<T>(path: string, options: RequestInit = {}, csrf?: str
     const message = typeof detail === 'string' ? detail : detail?.message;
     throw new ApiError(response.status, message || `Request failed (${response.status}). Please retry.`);
   }
+  return response;
+}
+
+export async function api<T>(path: string, options: RequestInit = {}, csrf?: string): Promise<T> {
+  const response = await apiResponse(path, options, csrf);
   return response.status === 204 ? undefined as T : response.json();
 }

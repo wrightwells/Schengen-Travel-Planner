@@ -4,7 +4,7 @@ from functools import partial
 from types import SimpleNamespace
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Body, Depends, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 
@@ -26,10 +26,10 @@ from app.services.travel import (
     trip_view,
     validate_trip,
 )
-from app.travel_schemas import EvaluationInput, TripInput, TripUpdate
+from app.travel_schemas import EvaluationInput, TripInput, TripPreviewInput, TripUpdate
 
 
-def travel_router(database, authenticated):
+def travel_router(database, authenticated, proof_storage):
     router = APIRouter(prefix="/api/v1", dependencies=[Depends(authenticated)])
 
     def lock_profiles(db):
@@ -43,6 +43,49 @@ def travel_router(database, authenticated):
         if trip is None:
             fail("TRIP_NOT_FOUND", "Trip not found", 404)
         return trip
+
+    def history_trip(db, trip_id, *, lock=False):
+        trip = get_trip(db, trip_id, lock=lock)
+        if trip.status != "HISTORY":
+            fail("HISTORY_REQUIRED", "Travel proofs belong to confirmed history entries", 409)
+        return trip
+
+    @router.get("/trips/{trip_id}/proofs")
+    def list_proofs(trip_id: UUID, db: DBSession = Depends(database)):
+        history_trip(db, trip_id)
+        return proof_storage.list(trip_id)
+
+    @router.post("/trips/{trip_id}/proofs", status_code=201)
+    def upload_proof(
+        trip_id: UUID,
+        request: Request,
+        filename: str = Query(min_length=1, max_length=255),
+        content: bytes = Body(media_type="application/octet-stream"),
+        db: DBSession = Depends(database),
+    ):
+        history_trip(db, trip_id, lock=True)
+        if request.headers.get("content-type") != "application/octet-stream":
+            fail("INVALID_PROOF_UPLOAD", "Send the document as application/octet-stream", 415)
+        return proof_storage.save(trip_id, filename, content)
+
+    @router.get("/trips/{trip_id}/proofs/{proof_id}")
+    def download_proof(trip_id: UUID, proof_id: UUID, db: DBSession = Depends(database)):
+        history_trip(db, trip_id)
+        metadata, content = proof_storage.download(trip_id, proof_id)
+        return Response(
+            content=content,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{metadata["filename"]}"',
+                "Content-Security-Policy": "sandbox; default-src 'none'",
+            },
+        )
+
+    @router.delete("/trips/{trip_id}/proofs/{proof_id}", status_code=204)
+    def delete_proof(trip_id: UUID, proof_id: UUID, db: DBSession = Depends(database)):
+        history_trip(db, trip_id, lock=True)
+        proof_storage.delete(trip_id, proof_id)
+        return Response(status_code=204)
 
     @router.post("/imports/history/preview")
     def preview_history_import(
@@ -237,6 +280,7 @@ def travel_router(database, authenticated):
         if trip.status == "HISTORY":
             invalidate_review(db, [p.traveller_id for p in trip.participants])
         audit(db, session.user_id, trip.id, "DELETE", before, {"deleted": True})
+        proof_storage.delete_all(trip_id)
         db.delete(trip)
         db.commit()
         return Response(status_code=204)
@@ -257,6 +301,22 @@ def travel_router(database, authenticated):
         db: DBSession = Depends(database),
     ):
         return summary(db, reference_date, Catalogue(db))
+
+    @router.post("/trips/preview")
+    def preview_trip(payload: TripPreviewInput, db: DBSession = Depends(database)):
+        catalogue = Catalogue(db)
+        if payload.exclude_trip_id:
+            get_trip(db, payload.exclude_trip_id)
+        validate_trip(db, payload.candidate, catalogue, exclude_id=payload.exclude_trip_id)
+        return {
+            "participants": [
+                {
+                    "traveller_id": str(p.traveller_id),
+                    "schengen_days": len(catalogue.presence(p.segments)),
+                }
+                for p in payload.candidate.participants
+            ]
+        }
 
     @router.post("/eligibility/evaluate")
     def evaluate_itinerary(payload: EvaluationInput, db: DBSession = Depends(database)):
@@ -337,6 +397,7 @@ def travel_router(database, authenticated):
                 {
                     "traveller_id": str(candidate.traveller_id),
                     "display_name": profile.display_name,
+                    "schengen_days": len(catalogue.presence(candidate.segments)),
                     **asdict(assessment),
                 }
             )

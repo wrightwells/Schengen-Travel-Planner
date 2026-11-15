@@ -46,6 +46,11 @@ class TripUpdate(TripInput):
     version: int = Field(ge=1)
 
 
+class TripPreviewInput(StrictModel):
+    candidate: TripInput
+    exclude_trip_id: UUID | None = None
+
+
 class EvaluationInput(StrictModel):
     candidate: TripInput
     included_plan_ids: list[UUID] = Field(default_factory=list, max_length=500)

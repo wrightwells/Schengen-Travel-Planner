@@ -15,7 +15,7 @@ PASSWORD = "a-test-household-password"
 
 
 @pytest.fixture
-def environment():
+def environment(tmp_path):
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
@@ -25,7 +25,13 @@ def environment():
     with DBSession(engine) as db:
         provision(db, "household", PASSWORD)
     app = create_app(
-        Settings("sqlite://", secure_cookie=False, allowed_hosts=("testserver",)), engine=engine
+        Settings(
+            "sqlite://",
+            secure_cookie=False,
+            allowed_hosts=("testserver",),
+            proof_storage_path=str(tmp_path / "proofs"),
+        ),
+        engine=engine,
     )
     with TestClient(app) as client:
         yield client, engine
